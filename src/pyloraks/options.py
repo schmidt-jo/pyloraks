@@ -36,8 +36,8 @@ class Config(sp.Serializable):
 
     read_dir: int = sp.field(alias="-rd", default=0,
                              help="specify read direction if not in x")
-    aspire_echo_indexes: tuple = sp.field(alias="-aei", default=(0, 1),
-                                          help="input echo indexes to use for phase coil combination with aspire (m=1)")
+    aspire_echo_indexes: list = sp.field(alias="-aei", default=(0, 1),
+                                         help="input echo indexes to use for phase coil combination with aspire (m=1)")
     wandb: bool = sp.field(alias="-wb", default=False)
 
     @classmethod

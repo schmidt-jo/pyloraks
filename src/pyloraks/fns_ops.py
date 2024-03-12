@@ -2,8 +2,10 @@
 import torch
 import logging
 import pathlib as plib
-from pyloraks import plotting
+from pyloraks import plotting, compression
 import skimage as ski
+import scipy.ndimage as sndi
+import tqdm
 log_module = logging.getLogger(__name__)
 
 
@@ -354,6 +356,148 @@ def construct_low_rank_matrix_from_svd(matrix_tensor: torch.tensor, rank: int):
     # free gpu memory
     del u, s, v, M, s_rd, s_m
     return m_rd
+
+
+def fft_mag_sos_phase_aspire_recon(
+        k_data_xyz_ch_t: torch.tensor,
+        se_indices: tuple | list = (0, 1),
+        combine_phase: bool = True) -> (torch.tensor, torch.tensor, torch.tensor):
+    # fft
+    data_xyz_ch_t = torch.fft.fftshift(
+        torch.fft.fft2(
+            torch.fft.ifftshift(
+                k_data_xyz_ch_t, dim=(0, 1)
+            ),
+            dim=(0, 1)
+        ),
+        dim=(0, 1)
+    )
+
+    # try compression before combination
+    # num_compress_channels = 16
+    # data_xyz_ch_t_compressed = torch.zeros(
+    #     (*data_xyz_ch_t.shape[:3], num_compress_channels, data_xyz_ch_t.shape[-1]),
+    #     dtype=torch.complex128
+    # )
+    # for echo_idx in tqdm.trange(k_data_xyz_ch_t.shape[-1], desc="compress channels per echo"):
+    #     data_xyz_ch_t_compressed[:, :, :, :, echo_idx] = torch.squeeze(
+    #         compression.compress_channels(
+    #             input_k_space=data_xyz_ch_t[:, :, :, :, echo_idx], num_compressed_channels=num_compress_channels
+    #         )
+    #     )
+
+    data_xyzt_mag = magnitude_coil_combination(data_xyz_ch_t=data_xyz_ch_t)
+
+    if combine_phase:
+        data_xyzt_ph, grad_offset = phase_coil_combination(data_xyz_ch_t=data_xyz_ch_t, se_indices=se_indices)
+    else:
+        data_xyzt_ph = torch.ones_like(data_xyzt_mag)
+        grad_offset = torch.ones_like(data_xyzt_mag)
+    return data_xyzt_mag, data_xyzt_ph, grad_offset
+
+
+def magnitude_coil_combination(data_xyz_ch_t: torch.tensor):
+    log_module.info("magnitude channel combination: rSoS")
+    return torch.sqrt(
+        torch.sum(
+            torch.square(
+                torch.abs(data_xyz_ch_t)
+            ),
+            dim=3
+        )
+    )
+
+
+def phase_coil_combination(data_xyz_ch_t: torch.tensor, se_indices: tuple = (0, 1)) -> (torch.tensor, torch.tensor):
+    """
+    phase coil combination following ASPIRE, Eckstein et al. doi: 10.1002/mrm.26963
+
+    :param data_xyz_ch_t: img space data - xyz-ch-t
+    :param se_indices: indices of spin echoes in time dimension, usually (0,1) for cpmg, (2,5) for megesse
+    :return:
+    """
+    log_module.info(f"processing phase coil combination")
+    log_module.info(f"\t\tset echo images to use: {se_indices}")
+    # sanity check
+    if len(data_xyz_ch_t.shape) != 5:
+        err = f"provided input data (shape {data_xyz_ch_t.shape}) does not match required shape (x,y,z,ch,t)"
+        log_module.exception(err)
+        raise AttributeError(err)
+    log_module.debug(f"build magnitude and phase data")
+    m_j = torch.abs(data_xyz_ch_t)
+    phi_j = torch.angle(data_xyz_ch_t)
+    log_module.debug(f"filter first echo magnitude data for approximate coil sensitivity weighting")
+    m_weights = torch.from_numpy(sndi.gaussian_filter(m_j[:, :, :, :, 0].numpy(force=True), sigma=10, axes=(0, 1)))
+    # dims [xyz, ch]
+
+    log_module.debug(f"start processing")
+    kernel_size = 20
+
+    # calculate HiP
+    # for aspire we need two echo images obeying m * TE_j = (m + 1) TE_k, for m int
+    # which would be true for all spin echoes. in case of gre and bipolar readouts for megesse / grase,
+    # we have an additional offset term for the central echo TE_se + m * delta_TE_j = TE_se + (m + 1) * delta_TE_k
+    # we might be able to include
+    # for now we pick first three spin echoes
+
+    # caution! this needs to be adjsuted for each sequence
+    se_indices = [*se_indices]
+    m_jk = torch.movedim(m_j, -1, 0)[se_indices]
+    phi_jk = torch.movedim(phi_j, -1, 0)[se_indices]
+
+    m_int = 1  # aspire condition
+
+    log_module.debug("calculate HiP")
+    # combine multiple echoes 1-2 & 2-3 & 3 - 4
+    # delta_phi_kj = np.zeros((num_combinations, *data.shape[:3]))
+    # se 1-2, se 2-3, se 3 - 4
+    # we reduce time dimension here! dims calculation [xyz - ch], result [3, xyz]
+    delta_phi_kj = torch.angle(
+        torch.sum(
+            m_jk[0] * m_jk[1] * torch.exp(
+                1j * (phi_jk[1] - phi_jk[0])
+            ),
+            dim=-1
+        )
+    )
+
+    log_module.debug(f"calculate phase offsets 0 - c")
+    # calculate wrapped phase offsets, subtract from j phase, j is first echo (1, 2) k is second used echo (2, 3)
+    # dims phi_jk [xyz, ch], delta_phi_jk [xyz]
+    phi_0_c = torch.angle(
+        torch.exp(
+            1j * phi_jk[0] - m_int * delta_phi_kj[:, :, :, None]
+        )
+    )
+
+    # smooth wrapped phase offsets
+    log_module.debug(f"filter calculated offsets phi_0_c")
+    phi_0_c_filtered = torch.from_numpy(
+        sndi.gaussian_filter(phi_0_c.numpy(force=True), sigma=kernel_size, axes=(0, 1))
+    )
+
+    log_module.info(f"\t\tset data for phase combine")
+    # phase combine coils - j index of echo number
+    # dims [xyz - ch]
+    m_j = (m_weights ** 2)[:, :, :, :, None]  # square for weighting
+    phi_diff = phi_j - phi_0_c_filtered[:, :, :, :, None]
+    # dims phi_0_filtered [xyz - ch]
+    log_module.info(f"\t\tphase combine coils")
+    # want result dims [xyz, t]
+    data_phase_combined = torch.angle(
+        torch.sum(
+            m_j * torch.exp(1j * phi_diff),
+            dim=-2
+        )
+    )
+
+    log_module.debug(f"calculate gradient phase offset")
+    # build some differences to compute the rest. only useful for megesse, switched readout directions
+    # (phi_3 - phi_2) - (phi_2 - phi_1)
+    diff_phi_kj = data_phase_combined[:, :, :, 2:4] - data_phase_combined[:, :, :, 1:3]
+    grad_phase_offset = - (diff_phi_kj[:, :, :, 0] - diff_phi_kj[:, :, :, 1]) / 4
+
+    return data_phase_combined, grad_phase_offset
 
 
 if __name__ == '__main__':

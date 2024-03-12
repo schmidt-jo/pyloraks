@@ -7,7 +7,7 @@ sys.path.append(p_wd.as_posix())
 import logging
 import torch
 from pyloraks import plotting, options, in_out, flavors, compression, fns_ops
-from lprd import recon_fns
+# from lprd import
 import pathlib as plib
 import wandb
 
@@ -118,47 +118,19 @@ def main(opts: options.Config):
         # save recon k-space
         nii_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
         in_out.save_data(out_path=out_path, name=nii_name, data=loraks_k_vector, affine=affine)
+    #
+    # # recon sos and phase coil combination
+    # np_loraks_k_space_recon = loraks_k_vector.numpy(force=True)
+    # # np_loraks_mag, np_loraks_phase, _ = recon_fns.fft_mag_sos_phase_aspire_recon(
+    # #     k_data_xyz_ch_t=np_loraks_k_space_recon, se_indices=opts.aspire_echo_indexes
+    # # )
+    # # loraks_img = torch.from_numpy(np_loraks_mag) * torch.exp(1j * torch.from_numpy(np_loraks_phase))
+    #
+    # # move back first axis to where read was
+    # loraks_img = fns_ops.shift_read_dir(loraks_img, read_dir=opts.read_dir, forward=False)
+    # # rearranging x, y, z, t
+    # nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    # in_out.save_data(out_path=out_path, name=nii_name, data=loraks_img, affine=affine)
 
-    # recon sos and phase coil combination
-    np_loraks_k_space_recon = loraks_k_vector.numpy(force=True)
-    np_loraks_mag, np_loraks_phase, _ = recon_fns.fft_mag_sos_phase_aspire_recon(
-        k_data_xyz_ch_t=np_loraks_k_space_recon, se_indices=opts.aspire_echo_indexes
-    )
-    loraks_img = torch.from_numpy(np_loraks_mag) * torch.exp(1j * torch.from_numpy(np_loraks_phase))
-
-    # move back first axis to where read was
-    loraks_img = fns_ops.shift_read_dir(loraks_img, read_dir=opts.read_dir, forward=False)
-    # rearranging x, y, z, t
-    nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
-    in_out.save_data(out_path=out_path, name=nii_name, data=loraks_img, affine=affine)
-
-    if opts.visualize:
-        logging.debug(f"reshape to k-space and plot")
-        # choose some slice
-        sli_id = int(sli / 2)
-        # dims [x, y, ]
-        plotting.plot_img(loraks_img[:, :, sli_id, 0], out_path=fig_path,
-                          name=f"loraks_img_recon_r-{opts.radius}_l-{opts.lam}_rank_reduced-{opts.rank}")
-
-
-if __name__ == '__main__':
-    parser = options.creat_cli()
-    args = parser.parse_args()
-    # load opts
-    config = options.Config.from_cli(args=args)
-    # set up logging
-    if config.debug:
-        level = logging.DEBUG
-    else:
-        level = logging.INFO
-        if config.wandb:
-            # setup wandb
-            wandb.init()
-    logging.basicConfig(format='%(asctime)s %(levelname)s :: %(name)s -- %(message)s',
-                        datefmt='%I:%M:%S', level=level)
-    try:
-        main(opts=config)
-    except Exception as e:
-        logging.error(e)
-        parser.print_usage()
-        exit(-1)
+    # if opts.visualize:
+    #     logging.debug(f"r

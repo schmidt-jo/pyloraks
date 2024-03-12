@@ -33,9 +33,10 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
         raise ValueError(err)
     log_module.info(f"extract ac region from sampling mask")
     # find ac data - this is implemented for the commonly used (in jstmc) sampling scheme of acquiring middle pe lines
-    # use 0th echo, ac should be equal for all slices, all channels and all echoes
+    # use 0th echo, ac should be equal for all slices, all channels and all echoes, if more than one echo
+    # in sampling scheme, pick not first, so we wont have trouble with pf data
     # start search in middle of pe dim
-    mid_read, mid_pe, _ = (torch.tensor(sampling_pattern.shape) / 2).to(torch.int)
+    mid_read, mid_pe, mid_e = (torch.tensor(torch.squeeze(sampling_pattern).shape) / 2).to(torch.int)
     lower_edge = mid_pe
     upper_edge = mid_pe
     # make sure sampling pattern is bool
@@ -43,10 +44,10 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
     for idx_pe in torch.arange(1, mid_pe):
         # looking for sampled line (actually just looking for the read middle point)
         # if previous line was also sampled were still in a fully sampled region
-        next_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe, 0]
-        next_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe, 0]
-        prev_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe - 1, 0]
-        prev_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe + 1, 0]
+        next_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe, mid_e]
+        next_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe, mid_e]
+        prev_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe - 1, mid_e]
+        prev_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe + 1, mid_e]
         if next_up_line_sampled and prev_up_line_sampled:
             upper_edge = mid_pe + idx_pe
         if next_low_line_sampled and prev_low_line_sampled:
@@ -61,7 +62,13 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
         plotting.plot_img(ac_mask.to(torch.int), out_path=fig_path, name="cc_ac_region")
     log_module.info(f"start pca -> building compression matrix from calibration data")
     # set input data
-    pca_data = input_k_space[ac_mask]
+    # extend mask to input
+    while ac_mask.shape.__len__() < input_k_space.shape.__len__():
+        ac_mask = ac_mask.unsqueeze(-1)
+    pca_data = torch.reshape(
+        input_k_space[ac_mask.expand(-1, -1, *input_k_space.shape[2:])],
+        (-1, *input_k_space.shape[2:])
+    )
     # set channel dimension first and rearrange rest
     pca_data = torch.moveaxis(pca_data, -2, 0)
     pca_data = torch.reshape(pca_data, (num_in_ch, -1))
@@ -80,7 +87,7 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
         plot_k = compressed_data[:, :, sli, ch, 0]
         plotting.plot_img(img_tensor=plot_k.clone().detach().cpu(), log_mag=True,
                           out_path=fig_path, name=f"fs_k_space_compressed")
-        fs_img_recon = torch.fft.ifftshift(torch.fft.ifft2(torch.fft.fftshift(plot_k)))
+        fs_img_recon = torch.fft.fftshift(torch.fft.ifft2(torch.fft.ifftshift(torch.abs(plot_k))))
         plotting.plot_img(img_tensor=fs_img_recon.clone().detach().cpu(),
                           out_path=fig_path, name="fs_recon_compressed")
     return compressed_data
