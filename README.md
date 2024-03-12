@@ -1,2 +1,2 @@
 # pyloraks
-Loraks k-space reconstruction in ptyhon
+Loraks k-space reconstruction in python
