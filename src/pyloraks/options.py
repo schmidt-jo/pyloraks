@@ -8,22 +8,67 @@ log_module = logging.getLogger(__name__)
 
 @dc.dataclass
 class Config(sp.Serializable):
-    config_file: str = sp.field(alias="-c", default="./pyloraks/example_data/config.json")
-    output_path: str = sp.field(alias="-o", default="./pyloraks/example_data/")
-    input_k: str = sp.field(alias="-im", default="./pyloraks/example_data/fs_k.pt")
-    input_k_extra: str = sp.field(alias="-ip", default="./pyloraks/example_data/fs_affine.pt",
-                                  help="input additional info needed such as affine or nii img header")
-    input_sampling_pattern: str = sp.field(alias="-is",
-                                           default="./pyloraks/example_data/us_sampling_mask.pt")
-    coil_compression: int = sp.field(alias="-cc", default=8)
-    debug: bool = sp.field(alias="-d", default=False)
-    process_slice: bool = sp.field(alias="-ps", default=False,
-                                   help="toggle processing of middle slize eg. for setting of LORAKS parameters."
-                                   )
-    visualize: bool = sp.field(alias="-v", default=True)
+    config_file: str = sp.field(
+        alias="-c", default="./pyloraks/example_data/config.json",
+        help=f"Provide configuration file in which all relevant options are given. "
+             f"Can be overwritten by additional cmd-line inputs"
+    )
+    output_path: str = sp.field(
+        alias="-o", default="",
+        help=f"(Optional) Specify output path. If left blank, input path is used."
+    )
+    input_k: str = sp.field(
+        alias="-im", default="./pyloraks/example_data/fs_k.pt",
+        help=f"Specify input k-space data path. If no sampling mask is provided unsampled data needs to be 0 padded. "
+             f"Takes .nii (.gz), .npy and .pt files. The latter two can be complex data."
+    )
+    input_extra: str = sp.field(
+        alias="-ip", default="./pyloraks/example_data/fs_affine.pt",
+        help="If input is not .nii format, we need the affine transformation as additional input to output .nii."
+             "If input is .nii format, we can use this to input additional phase data."
+    )
+    input_sampling_mask: str = sp.field(
+        alias="-is", default="./pyloraks/example_data/us_sampling_mask.pt",
+        help=f"Specify input k-space-sampling pattern path. "
+             f"If no sampling mask is provided it will be deduced from input data."
+    )
+    coil_compression: int = sp.field(
+        alias="-cc", default=8,
+        help=f"Specify coil compression for multi channel data. Default working mode is "
+             f"Joint-Echo-Channel reconstruction, which can lead to memory problems. "
+             f"Compression can help in those cases."
+    )
+    read_dir: int = sp.field(
+        alias="-rd", default=0,
+        help="specify read direction if not in x. Necessary for AC LORAKS to deduce AC region."
+    )
+    # aspire_echo_indexes: tuple = sp.field(
+    #     alias="-aei", default_factory=(0, 1),
+    #     help="Input echo indexes to use for phase coil combination with aspire (m=1). "
+    #          "Usually the indices of first two SE data in the echo train"
+    # )
 
-    mode: str = sp.field(choices=["s", "S", "c", "C", "g", "G"], alias="m", default="s")
-    flavour: str = sp.field(choices=["AC-Loraks", "Loraks"], alias="-f", default="AC-Loraks")
+    debug: bool = sp.field(
+        alias="-d", default=False,
+        help="If set provides additional debugging information. Reduces input data for quicker processing."
+    )
+    process_slice: bool = sp.field(
+        alias="-ps", default=False,
+        help="toggle processing of middle slize and not whole volume, eg. for testing LORAKS parameters."
+    )
+    visualize: bool = sp.field(
+        alias="-v", default=True,
+        help="If set enables visualization & plots of intermediate data."
+    )
+
+    mode: str = sp.field(
+        choices=["s", "S", "c", "C", "g", "G"], alias="-m", default="s",
+        help=f"LORAKS mode."
+    )
+    flavour: str = sp.field(
+        choices=["AC-LORAKS", "LORAKS"], alias="-f", default="AC-LORAKS",
+        help=f"LORAKS flavour. Implementation of different LORAKS variations."
+    )
 
     rank: int = sp.field(alias="-rr", default=100)
     radius: int = sp.field(alias="-r", default=3)
@@ -31,13 +76,9 @@ class Config(sp.Serializable):
 
     lambda_data: float = sp.field(alias="-dl", default=0.5)
     conv_tol: float = sp.field(alias="-ct", default=1e-3)
-    batch_size: int = sp.field(alias="-b", default=4)
     max_num_iter: int = sp.field(alias="-mni", default=10)
 
-    read_dir: int = sp.field(alias="-rd", default=0,
-                             help="specify read direction if not in x")
-    aspire_echo_indexes: tuple = sp.field(alias="-aei", default=(0, 1),
-                                          help="input echo indexes to use for phase coil combination with aspire (m=1)")
+    batch_size: int = sp.field(alias="-b", default=4)
     wandb: bool = sp.field(alias="-wb", default=False)
 
     @classmethod
