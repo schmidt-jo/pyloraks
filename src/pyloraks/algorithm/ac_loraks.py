@@ -57,6 +57,14 @@ class ACLoraks(Base):
             s_matrix = self.op_x.operator(k_space=s_mac_k_in)
             # and keep only the fully populated rows
             m_ac = s_matrix[torch.tile(idxs_ac, dims=(2,))]
+            if idx_slice == 0 and self.visualize:
+                # plot the found acs for reference
+                acs = torch.zeros_like(s_matrix)
+                acs[torch.tile(idxs_ac, dims=(2,))] = 1
+                acs = self.op_x.operator_adjoint(acs)
+                acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
+                for i in range(3):
+                    plotting.plot_slice(acs[:, :, i], f"acs_e-{i + 1}", self.fig_path)
         else:
             err = f"ACS calibration not implemented (yet) for mode {self.mode}. Choose either c or s"
             log_module.error(err)
@@ -67,38 +75,38 @@ class ACLoraks(Base):
             raise ValueError(err)
         if torch.cuda.is_available():
             m_ac = m_ac.to(torch.device("cuda:0"))
-        # evaluate nullspace
-        u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
-        m_ac_rank = v.shape[1]
+        # # evaluate nullspace
+        # u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
+        # m_ac_rank = v.shape[1]
+        eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
+        m_ac_rank = eig_vals.shape[0]
         if m_ac_rank < self.rank:
             err = f"loraks rank parameter is too large, cant be bigger than ac matrix dimensions."
             log_module.error(err)
             raise ValueError(err)
         # get subspaces from svd of subspace matrix
-        v_null = v[self.rank:].to(self.device)
-        v_sub = v[:self.rank].to(self.device)
+        eig_vals, idxs = torch.sort(eig_vals, descending=True)
+        eig_vecs = eig_vecs[:, idxs]
+        v_sub = eig_vecs[:self.rank].to(self.device)
+        # v_null = v[self.rank:].to(self.device)
+        # v_sub = v[:self.rank].to(self.device)
         # u_sub = u[:self.rank].to(self.device)
         # u_null = u[self.rank:].to(self.device)
         # get into complex shape
         # dim_nb = fns_ops.get_k_radius_grid_points(self.radius).shape[0]
 
-        # if idx_slice == 0 and self.visualize:
-        #     # nullspace: reshape and split values
-        #     v_null_split_cplx = v_null
-        #     dim_ns = v_null_split_cplx.shape[1]
-        #     v_null_split_cplx = torch.reshape(v_null_split_cplx, (dim_ns, self.dim_nb, -1))
-        #     v_null_split_cplx = v_null_split_cplx[:, :, ::2] + 1j * v_null_split_cplx[:, :, 1::2]
-        #     v_null_cplx = torch.reshape(v_null_split_cplx, (dim_ns, -1)).conj().T
-        #     plotting.plot_slice(v_null_cplx, name="cplx_nullspace_slice_0", outpath=self.fig_path)
-        #     # subspace: reshape and split values
-        #     v_sub_split_cplx = v_sub
-        #     dim_ns = v_sub_split_cplx.shape[0]
-        #     v_sub_split_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, self.dim_nb, -1))
-        #     v_sub_split_cplx = v_sub_split_cplx[:, :, ::2] + 1j * v_sub_split_cplx[:, :, 1::2]
-        #     v_null_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, -1)).conj().T
-        #     plotting.plot_slice(v_null_cplx, name="cplx_subspace_slice_0", outpath=self.fig_path)
+        if idx_slice == 0 and self.visualize:
+            # nullspace: reshape and split values
+            # v_null_split_cplx = v_null
+            # dim_ns = v_null_split_cplx.shape[1]
+            # v_null_split_cplx = torch.reshape(v_null_split_cplx, (dim_ns, self.dim_nb, -1))
+            # v_null_split_cplx = v_null_split_cplx[:, :, ::2] + 1j * v_null_split_cplx[:, :, 1::2]
+            # v_null_cplx = torch.reshape(v_null_split_cplx, (dim_ns, -1)).conj().T
+            # plotting.plot_slice(v_null_cplx, name="cplx_nullspace_slice_0", outpath=self.fig_path)
+            # subspace: reshape and split values
+            plotting.plot_slice(eig_vecs[:, :self.rank], name="cplx_subspace_slice_0", outpath=self.fig_path)
 
-        return v_null.T, v_sub.T
+        return v_sub.T
 
     def _get_m_1_diag_vector(self, f: torch.tensor, v: torch.tensor) -> torch.tensor:
         """
@@ -172,7 +180,7 @@ class ACLoraks(Base):
         for idx_slice in range(self.dim_slice):
             log_module.info(f"Reconstruction::Processing::Slice {1 + idx_slice} / {self.dim_slice}")
             log_module.debug("estimate nullspace")
-            v_null, v_sub = self.get_acs_v(idx_slice=idx_slice)
+            v_sub = self.get_acs_v(idx_slice=idx_slice)
 
             vvh = torch.matmul(v_sub, v_sub.conj().T)
 
