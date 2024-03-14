@@ -81,7 +81,7 @@ class Base:
         if self.visualize:
             plotting.plot_slice(
                 torch.reshape(self.p_star_p, (self.dim_phase, self.dim_phase)),
-                name="p*p", outpath=self.fig_path
+                name="p_star_p", outpath=self.fig_path,
             )
 
         #     logging.debug(f"look at undersampled data")

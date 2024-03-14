@@ -42,34 +42,21 @@ class ACLoraks(Base):
         elif self.mode == "s" or self.mode == "S":
             # we can use the sampling mask, rebuild it in 2d
             mask = torch.reshape(self.fhf, (self.dim_read, self.dim_phase, self.dim_echoes))
-            # save neighborhood size
-            kn_pts = fns_ops.get_k_radius_grid_points(self.radius)
-
             # momentarily the implementation is aiming at joint echo recon. we use all echoes,
             # but might need to batch the channel dimensions. in the nullspace approx we use all data
             # get indices for centered origin k-space
-            m_nx_ny_idxs, p_nx_ny_idxs = self.op_x.get_half_space_k_dims()
-            p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
-            # build inverted indexes - point symmetric origin in center
-            m_nb_nx_ny_idxs = torch.tensor([*self.k_space_dims[:2]])[None, :] - p_nb_nx_ny_idxs - 1
-            # get indices for which whole neighborhood is contained for both locations
-
-            # for all echoes we check which k-space parts are included as a whole
-            # first get all masking points which are accessed in s_matrix creation
-            p_mask = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1], :]
-            n_mask = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1], :]
-            # get indices if whole neighborhood is included
-            # (i.e. each point in neighborhood has mask value 1, for all echoes)
-            idxs_ac = torch.squeeze(torch.nonzero(
-                (torch.sum(p_mask, dim=(1, 2)) == self.dim_echoes * self.dim_nb) &
-                (torch.sum(n_mask, dim=(1, 2)) == self.dim_echoes * self.dim_nb)
-            )
-            )
+            p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.get_point_symmetric_neighborhoods()
+            # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
+            a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
+            b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
+            # lets look for the ACS which is constant across the joint dimension and the neighborhood
+            c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
+            idxs_ac = (c == self.dim_nb * self.dim_t_ch * 2)
             # now we build the s_matrix with the 0 filled data
             s_mac_k_in = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
             s_matrix = self.op_x.operator(k_space=s_mac_k_in)
             # and keep only the fully populated rows
-            m_ac = s_matrix[idxs_ac]
+            m_ac = s_matrix[torch.tile(idxs_ac, dims=(2,))]
         else:
             err = f"ACS calibration not implemented (yet) for mode {self.mode}. Choose either c or s"
             log_module.error(err)
@@ -90,28 +77,30 @@ class ACLoraks(Base):
         # get subspaces from svd of subspace matrix
         v_null = v[self.rank:].to(self.device)
         v_sub = v[:self.rank].to(self.device)
+        # u_sub = u[:self.rank].to(self.device)
+        # u_null = u[self.rank:].to(self.device)
         # get into complex shape
-        dim_nb = fns_ops.get_k_radius_grid_points(self.radius).shape[0]
+        # dim_nb = fns_ops.get_k_radius_grid_points(self.radius).shape[0]
 
-        if idx_slice == 0 and self.visualize:
-            # nullspace: reshape and split values
-            v_null_split_cplx = v_null
-            dim_ns = v_null_split_cplx.shape[0]
-            v_null_split_cplx = torch.reshape(v_null_split_cplx, (dim_ns, self.dim_nb, -1))
-            v_null_split_cplx = v_null_split_cplx[:, :, ::2] + 1j * v_null_split_cplx[:, :, 1::2]
-            v_null_cplx = torch.reshape(v_null_split_cplx, (dim_ns, -1)).conj().T
-            plotting.plot_slice(v_null_cplx, name="cplx_nullspace_slice_0", outpath=self.fig_path)
-            # subspace: reshape and split values
-            v_sub_split_cplx = v_sub
-            dim_ns = v_sub_split_cplx.shape[0]
-            v_sub_split_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, self.dim_nb, -1))
-            v_sub_split_cplx = v_sub_split_cplx[:, :, ::2] + 1j * v_sub_split_cplx[:, :, 1::2]
-            v_null_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, -1)).conj().T
-            plotting.plot_slice(v_null_cplx, name="cplx_subspace_slice_0", outpath=self.fig_path)
+        # if idx_slice == 0 and self.visualize:
+        #     # nullspace: reshape and split values
+        #     v_null_split_cplx = v_null
+        #     dim_ns = v_null_split_cplx.shape[1]
+        #     v_null_split_cplx = torch.reshape(v_null_split_cplx, (dim_ns, self.dim_nb, -1))
+        #     v_null_split_cplx = v_null_split_cplx[:, :, ::2] + 1j * v_null_split_cplx[:, :, 1::2]
+        #     v_null_cplx = torch.reshape(v_null_split_cplx, (dim_ns, -1)).conj().T
+        #     plotting.plot_slice(v_null_cplx, name="cplx_nullspace_slice_0", outpath=self.fig_path)
+        #     # subspace: reshape and split values
+        #     v_sub_split_cplx = v_sub
+        #     dim_ns = v_sub_split_cplx.shape[0]
+        #     v_sub_split_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, self.dim_nb, -1))
+        #     v_sub_split_cplx = v_sub_split_cplx[:, :, ::2] + 1j * v_sub_split_cplx[:, :, 1::2]
+        #     v_null_cplx = torch.reshape(v_sub_split_cplx, (dim_ns, -1)).conj().T
+        #     plotting.plot_slice(v_null_cplx, name="cplx_subspace_slice_0", outpath=self.fig_path)
 
-        return v_null.conj().T, v_sub.conj().T
+        return v_null.T, v_sub.T
 
-    def _get_m_1_diag_vector(self, f: torch.tensor, vvh: torch.tensor) -> torch.tensor:
+    def _get_m_1_diag_vector(self, f: torch.tensor, v: torch.tensor) -> torch.tensor:
         """
         We define the M_1 matrix from A^H A f and the loraks operator P_x(f) V V^H,
         after extracting V from ACS data and getting the P_x based on the Loraks mode used.
@@ -120,7 +109,8 @@ class ACLoraks(Base):
         m1_v = torch.flatten(
             self.op_x.operator_adjoint(
                 torch.matmul(
-                    self.op_x.operator(torch.reshape(f, (self.dim_s, -1))), vvh
+                    self.op_x.operator(torch.reshape(f, (self.dim_s, -1))),
+                    v
                 )
             )
         )

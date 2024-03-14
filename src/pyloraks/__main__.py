@@ -123,15 +123,17 @@ def main(opts: options.Config):
         k_space = torch.swapdims(k_space, 0, 1)
         sampling_pattern = torch.swapdims(sampling_pattern, 0, 1)
 
+    logging.debug(f"Check Debug toggle set & if, reduce dims")
+    if opts.debug:
+        # for debuging take one coil
+        k_space = k_space[:, :, :, 0, None, :]
+        # also take one slice. if not set anyway, we set it
+        opts.process_slice = True
     logging.debug(f"Check single slice toggle set")
     if opts.process_slice:
         mid_slice = int(k_space.shape[2] / 2)
         logging.info(f"single slice processing: pick slice {mid_slice + 1}")
         k_space = k_space[:, :, mid_slice, None]
-    logging.debug(f"Check Debug toggle set & if, reduce dims")
-    if opts.debug:
-        # for debuging take one coil
-        k_space = k_space[:, :, :, 0, None, :]
     logging.debug(f"Check sampling pattern shape")
     if sampling_pattern.shape.__len__() < 3:
         # sampling pattern supposed to be x, y, t

@@ -73,11 +73,25 @@ class LoraksOperator:
     def p_star_p(self, k_vector):
         return self.operator_adjoint(self.operator(k_vector))
 
-    def _get_k_space_pt_idxs(self):
+    def _get_k_space_pt_idxs(self, include_offset: bool = False, point_symmetric_mirror: bool = False):
+        # give all points except radius
+        offset_x = 0
+        offset_y = 0
+        if include_offset:
+            # need to compute differences for odd and even k-space dims
+            if self.k_space_dims[0] % 2 < 1e-5:
+                offset_x = 1
+            if self.k_space_dims[1] % 2 < 1e-5:
+                offset_y = 1
+        x_aranged = torch.arange(self.radius + offset_x, self.k_space_dims[0] - self.radius)
+        y_aranged = torch.arange(self.radius + offset_y, self.k_space_dims[1] - self.radius)
+        if point_symmetric_mirror:
+            x_aranged = torch.flip(x_aranged, dims=(0,))
+            y_aranged = torch.flip(y_aranged, dims=(0,))
         return torch.tensor([
             (x, y)
-            for x in torch.arange(self.radius, self.k_space_dims[0] - self.radius)
-            for y in torch.arange(self.radius, self.k_space_dims[1] - self.radius)
+            for x in x_aranged
+            for y in y_aranged
         ]).to(torch.int)
 
     def _get_half_space_k_dims(self):
@@ -97,6 +111,22 @@ class LoraksOperator:
         minus_nx_ny_idxs = k_center_minus - nx_ny
         plus_nx_ny_idxs = k_center_plus + nx_ny
         return minus_nx_ny_idxs.to(torch.int), plus_nx_ny_idxs.to(torch.int)
+
+    def get_point_symmetric_neighborhoods(self):
+        # get neighborhood points
+        kn_pts = get_k_radius_grid_points(radius=self.radius)
+        # build neighborhoods
+        # if even number of k-space points, k-space center aka 0 is considered positive.
+        # ie. there is one more negative line/point than positives.
+        # If odd center is exactly in the middle and we have one equal positive and negatives.
+        # In this scenario, the central line would be present twice in the matrix (s-matrix)
+        # get k-space-indexes
+        p_nx_ny_idxs = self._get_k_space_pt_idxs(include_offset=True, point_symmetric_mirror=False)
+        m_nx_ny_idxs = self._get_k_space_pt_idxs(include_offset=True, point_symmetric_mirror=True)
+        p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
+        # build inverted indexes - point symmetric origin in center
+        m_nb_nx_ny_idxs = m_nx_ny_idxs[:, None] + kn_pts[None, :]
+        return p_nb_nx_ny_idxs, m_nb_nx_ny_idxs
 
 
 class C(LoraksOperator):
@@ -165,39 +195,35 @@ class S(LoraksOperator):
         super().__init__(k_space_dims=k_space_dims, radius=radius)
 
     def _operator(self, k_space: torch.tensor) -> torch.tensor:
-        # input k space always 2d [xy, t_ch]
-        # get neighborhood points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
-        # get indices for k-space points
-        nx_ny_idxs = self._get_k_space_pt_idxs()
         # build neighborhoods
-        p_nb_nx_ny_idxs = nx_ny_idxs[:, None] + kn_pts[None, :]
-        # build inverted indexes - point symmetric origin in center
-        m_nb_nx_ny_idxs = torch.tensor([*self.k_space_dims[:2]])[None, :] - p_nb_nx_ny_idxs - 1
+        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.get_point_symmetric_neighborhoods()
         # get dimensions
-        xy = k_space.shape[0]
-        nb = kn_pts.shape[0]
-        tch = k_space.shape[-1]
-        nb_tch = nb * tch  # added channel and time dimensions
+        # xy = k_space.shape[0]
+        # nb = kn_pts.shape[0]
+        # tch = k_space.shape[-1]
+        # nb_tch = nb * tch  # added channel and time dimensions
         # need to separate xy dims
         k_space = torch.reshape(k_space, (self.k_space_dims[0], self.k_space_dims[1], -1))
         # build S matrix
-        s_rp = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_rm = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_ip = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_im = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
+        # s_p = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.complex128, device=k_space.device)
+        # s_m = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.complex128, device=k_space.device)
         log_module.debug(f"build s matrix")
-        ts = torch.arange(tch) * nb
-        for idx_nb in range(nb):
-            s_rp[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]].real
-            s_rm[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]].real
-            s_ip[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]].imag
-            s_im[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]].imag
-
+        # ts = torch.arange(tch) * nb
+        # for idx_nb in range(nb):
+        #     s_p[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]]
+        #     s_m[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]]
+        s_p = torch.reshape(
+            k_space[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]],
+            (p_nb_nx_ny_idxs.shape[0], -1)
+        )
+        s_m = torch.reshape(
+            k_space[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]],
+            (p_nb_nx_ny_idxs.shape[0], -1)
+        )
         s_matrix = torch.concatenate(
             (
-                torch.concatenate([s_rp - s_rm, -s_ip + s_im], dim=1),
-                torch.concatenate([s_ip + s_im, s_rp + s_rm], dim=1)
+                torch.concatenate([(s_p - s_m).real, (-s_p + s_m).imag], dim=1),
+                torch.concatenate([(s_p + s_m).imag, (s_p + s_m).real], dim=1)
             ), dim=0
         )
         return s_matrix
@@ -243,12 +269,8 @@ class S(LoraksOperator):
         device = x_matrix.device
         # get neighborhood points
         kn_pts = get_k_radius_grid_points(radius=self.radius)
-        # get indices for centered origin k-space
-        p_nx_ny_idxs = self._get_k_space_pt_idxs()
         # build neighborhood
-        p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
-        # build inverted indexes - point symmetric origin in center
-        m_nb_nx_ny_idxs = torch.tensor([*self.k_space_dims[:2]])[None, :] - p_nb_nx_ny_idxs - 1
+        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.get_point_symmetric_neighborhoods()
         # store shapes
         sm, sk = x_matrix.shape
         # extract sub-matrices
