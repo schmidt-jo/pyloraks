@@ -25,11 +25,8 @@ class ACLoraks(Base):
         log_module.debug(f"Setup AC LORAKS specifics")
         self.fft_algorithm: bool = fft_algorithm
         # compute aha - stretch along channels
-        self.aha = torch.flatten(
-            torch.repeat_interleave(
-                self.fhf, self.dim_channels, dim=-1
-            ) + self.lam * self.p_star_p[:, None]
-        ).to(self.device)      # -> as in matlab version multiplying with psp
+        fhf = self.fhf[:, None, :].expand((-1, self.dim_channels, -1))
+        self.aha = torch.flatten(fhf + self.lam * self.p_star_p[:, None, None]).to(self.device)      # -> as in matlab version multiplying with psp
         # self.aha = torch.flatten(
         #     torch.repeat_interleave(
         #         self.fhf, self.dim_channels, dim=-1
