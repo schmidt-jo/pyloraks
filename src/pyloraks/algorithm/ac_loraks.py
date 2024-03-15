@@ -25,16 +25,16 @@ class ACLoraks(Base):
         log_module.debug(f"Setup AC LORAKS specifics")
         self.fft_algorithm: bool = fft_algorithm
         # compute aha - stretch along channels
-        # self.aha = torch.flatten(
-        #     torch.repeat_interleave(
-        #         self.fhf, self.dim_channels, dim=-1
-        #     ) + self.lam * self.p_star_p[:, None]
-        # ).to(self.device)      # -> as in matlab version multiplying with psp
         self.aha = torch.flatten(
             torch.repeat_interleave(
                 self.fhf, self.dim_channels, dim=-1
-            )
-        ).to(self.device)
+            ) + self.lam * self.p_star_p[:, None]
+        ).to(self.device)      # -> as in matlab version multiplying with psp
+        # self.aha = torch.flatten(
+        #     torch.repeat_interleave(
+        #         self.fhf, self.dim_channels, dim=-1
+        #     )
+        # ).to(self.device)
 
     def get_acs_v(self, idx_slice: int):
         """
@@ -86,19 +86,19 @@ class ACLoraks(Base):
             m_ac = m_ac.to(torch.device("cuda:0"))
         # # evaluate nullspace
         # via svd
-        u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
-        v_sub = v[:self.rank].to(self.device).T
-        m_ac_rank = v.shape[1]
+        # u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
+        # v_sub = v[:self.rank].to(self.device).T
+        # m_ac_rank = v.shape[1]
 
         # via eigh
-        # eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
-        # m_ac_rank = eig_vals.shape[0]
-        # # get subspaces from svd of subspace matrix
-        # eig_vals, idxs = torch.sort(eig_vals, descending=True)
-        # # eig_vecs_r = eig_vecs[idxs]
-        # eig_vecs = eig_vecs[:, idxs]
-        # # v_sub_r = eig_vecs_r[:self.rank].to(self.device)
-        # v_sub = eig_vecs[:, :self.rank].to(self.device)
+        eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
+        m_ac_rank = eig_vals.shape[0]
+        # get subspaces from svd of subspace matrix
+        eig_vals, idxs = torch.sort(eig_vals, descending=True)
+        # eig_vecs_r = eig_vecs[idxs]
+        eig_vecs = eig_vecs[:, idxs]
+        # v_sub_r = eig_vecs_r[:self.rank].to(self.device)
+        v_sub = eig_vecs[:, :self.rank].to(self.device)
 
         if m_ac_rank < self.rank:
             err = f"loraks rank parameter is too large, cant be bigger than ac matrix dimensions."

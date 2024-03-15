@@ -219,10 +219,32 @@ def main(opts: options.Config):
     logging.info(f"write file: {fig_name}")
     fig.write_html(fig_name.as_posix())
 
+    #save recon as nii for now to look at
+    # rSoS k-space-data for looking at it
+    loraks_recon_mag = torch.sqrt(
+        torch.sum(
+            torch.square(
+                torch.abs(loraks_recon)
+            ),
+            dim=-2
+        )
+    )
+
+    loraks_phase = torch.angle(loraks_recon)
+    loraks_phase = torch.mean(loraks_phase, dim=-2)
+
+    loraks_recon_k = loraks_recon_mag * torch.exp(1j * loraks_phase)
+    if opts.process_slice:
+        loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
+
+    nii_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_k, affine=affine)
+
+
     logging.info("FFT into image space")
     # fft into real space
     loraks_recon_img = torch.fft.fftshift(
-        torch.fft.fft(
+        torch.fft.fft2(
             torch.fft.ifftshift(
                 loraks_recon, dim=(0, 1)
             ),
@@ -242,7 +264,7 @@ def main(opts: options.Config):
         )
     )
 
-    loraks_phase = torch.angle(loraks_recon)
+    loraks_phase = torch.angle(loraks_recon_img)
     loraks_phase = torch.mean(loraks_phase, dim=-2)
 
     loraks_recon_img = loraks_recon_mag * torch.exp(1j * loraks_phase)
@@ -251,13 +273,6 @@ def main(opts: options.Config):
 
     nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
     utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_img, affine=affine)
-    # if opts.visualize:
-    #     logging.debug(f"reshape to k-space and plot")
-    #     # choose some slice
-    #     sli_id = int(sli / 2)
-    #     # dims [x, y, ]
-    #     plotting.plot_img(loraks_img[:, :, sli_id, 0], out_path=fig_path,
-    #                       name=f"loraks_img_recon_r-{opts.radius}_l-{opts.lam}_rank_reduced-{opts.rank}")
 
 
 if __name__ == '__main__':
