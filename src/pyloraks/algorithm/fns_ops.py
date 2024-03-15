@@ -52,6 +52,7 @@ class LoraksOperator:
             k_space_dims[0] * k_space_dims[1],  # xy
             k_space_dims[2] * k_space_dims[3]  # t-ch
         )
+        self.point_sym_nb_coos = self.get_point_symmetric_neighborhoods()
 
     def operator(self, k_space: torch.tensor) -> torch.tensor:
         """ k-space input in 2d, [xy, ch_t(possibly batched)]"""
@@ -196,7 +197,7 @@ class S(LoraksOperator):
 
     def _operator(self, k_space: torch.tensor) -> torch.tensor:
         # build neighborhoods
-        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.get_point_symmetric_neighborhoods()
+        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.point_sym_nb_coos
         # get dimensions
         # xy = k_space.shape[0]
         # nb = kn_pts.shape[0]
@@ -212,20 +213,17 @@ class S(LoraksOperator):
         # for idx_nb in range(nb):
         #     s_p[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]]
         #     s_m[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]]
-        s_p = torch.reshape(
-            k_space[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]],
-            (p_nb_nx_ny_idxs.shape[0], -1)
-        )
-        s_m = torch.reshape(
-            k_space[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]],
-            (p_nb_nx_ny_idxs.shape[0], -1)
-        )
-        s_matrix = torch.concatenate(
-            (
-                torch.concatenate([(s_p - s_m).real, (-s_p + s_m).imag], dim=1),
-                torch.concatenate([(s_p + s_m).imag, (s_p + s_m).real], dim=1)
+        # we build the matrices per channel / time image
+        s_p = k_space[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
+        s_m = k_space[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
+        # concatenate along respective dimensions
+        s_matrix = torch.concatenate((
+            torch.concatenate([(s_p - s_m).real, (-s_p + s_m).imag], dim=1),
+            torch.concatenate([(s_p + s_m).imag, (s_p + s_m).real], dim=1)
             ), dim=0
         )
+        # now we want the neighborhoods of individual t-ch info to be concatenated into the neighborhood axes.
+        s_matrix = torch.reshape(torch.movedim(s_matrix, -1, 1), (s_matrix.shape[0], -1))
         return s_matrix
 
     def _operator_halfspaces(self, k_space: torch.tensor) -> torch.tensor:
@@ -266,6 +264,45 @@ class S(LoraksOperator):
         return s_matrix
 
     def _adjoint(self, x_matrix: torch.tensor) -> torch.tensor:
+        # get neighborhood points
+        kn_pts = get_k_radius_grid_points(radius=self.radius)
+        # build neighborhood
+        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.point_sym_nb_coos
+        # store shapes
+        sm, sk = x_matrix.shape
+        # get dims
+        nb = p_nb_nx_ny_idxs.shape[1]
+        snb = nb * 2
+        n_tch = int(sk / snb)
+        # extract sub-matrices - they are concatenated in neighborhood dimension for all t-ch images
+        t_ch_idxs = torch.arange(snb)[:, None] + torch.arange(n_tch)[None, :] * snb
+        x_matrix = x_matrix[:, t_ch_idxs]
+
+        srp_m_srm = x_matrix[:int(sm / 2), :int(snb / 2)]
+        msip_p_sim = x_matrix[:int(sm / 2), int(snb / 2):]
+        sip_p_sim = x_matrix[int(sm / 2):, :int(snb / 2)]
+        srp_p_srm = x_matrix[int(sm / 2):, int(snb / 2):]
+        # extract sub-sub
+        srp = srp_m_srm + srp_p_srm
+        srm = - srp_m_srm + srp_p_srm
+        sip = sip_p_sim - msip_p_sim
+        sim = msip_p_sim + sip_p_sim
+
+        # build k_space
+        k_space_recon = torch.zeros((*self.k_space_dims[:2], n_tch), dtype=torch.complex128).to(x_matrix.device)
+        # # fill k_space
+        log_module.debug(f"build k-space from s-matrix")
+        nb = int(snb / 2)
+        for idx_nb in range(nb):
+            k_space_recon[
+                p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]
+            ] += srp[:, idx_nb] + 1j * sip[:, idx_nb]
+            k_space_recon[
+                m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]
+            ] += srm[:, idx_nb] + 1j * sim[:, idx_nb]
+        return torch.reshape(k_space_recon, (-1, n_tch))
+
+    def _adjoint_rxv(self, x_matrix: torch.tensor) -> torch.tensor:
         device = x_matrix.device
         # get neighborhood points
         kn_pts = get_k_radius_grid_points(radius=self.radius)
@@ -273,7 +310,8 @@ class S(LoraksOperator):
         p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.get_point_symmetric_neighborhoods()
         # store shapes
         sm, sk = x_matrix.shape
-        # extract sub-matrices
+        # extract sub-matrices - they are concatenated in neighborhood dimension for all t-ch images
+
         srp_m_srm = x_matrix[:int(sm / 2), :int(sk / 2)]
         msip_p_sim = x_matrix[:int(sm / 2), int(sk / 2):]
         sip_p_sim = x_matrix[int(sm / 2):, :int(sk / 2)]

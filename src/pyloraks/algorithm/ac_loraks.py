@@ -45,7 +45,7 @@ class ACLoraks(Base):
             # momentarily the implementation is aiming at joint echo recon. we use all echoes,
             # but might need to batch the channel dimensions. in the nullspace approx we use all data
             # get indices for centered origin k-space
-            p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.get_point_symmetric_neighborhoods()
+            p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.point_sym_nb_coos
             # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
             a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
             b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
@@ -63,8 +63,7 @@ class ACLoraks(Base):
                 acs[torch.tile(idxs_ac, dims=(2,))] = 1
                 acs = self.op_x.operator_adjoint(acs)
                 acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
-                for i in range(3):
-                    plotting.plot_slice(acs[:, :, i], f"acs_e-{i + 1}", self.fig_path)
+                plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
         else:
             err = f"ACS calibration not implemented (yet) for mode {self.mode}. Choose either c or s"
             log_module.error(err)
@@ -76,37 +75,30 @@ class ACLoraks(Base):
         if torch.cuda.is_available():
             m_ac = m_ac.to(torch.device("cuda:0"))
         # # evaluate nullspace
-        # u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
-        # m_ac_rank = v.shape[1]
-        eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
-        m_ac_rank = eig_vals.shape[0]
+        # via svd
+        u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
+        v_sub = v[:self.rank].to(self.device).T
+        m_ac_rank = v.shape[1]
+
+        # via eigh
+        # eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
+        # m_ac_rank = eig_vals.shape[0]
+        # # get subspaces from svd of subspace matrix
+        # eig_vals, idxs = torch.sort(eig_vals, descending=True)
+        # # eig_vecs_r = eig_vecs[idxs]
+        # eig_vecs = eig_vecs[:, idxs]
+        # # v_sub_r = eig_vecs_r[:self.rank].to(self.device)
+        # v_sub = eig_vecs[:, :self.rank].to(self.device)
+
         if m_ac_rank < self.rank:
             err = f"loraks rank parameter is too large, cant be bigger than ac matrix dimensions."
             log_module.error(err)
             raise ValueError(err)
-        # get subspaces from svd of subspace matrix
-        eig_vals, idxs = torch.sort(eig_vals, descending=True)
-        eig_vecs = eig_vecs[:, idxs]
-        v_sub = eig_vecs[:self.rank].to(self.device)
-        # v_null = v[self.rank:].to(self.device)
-        # v_sub = v[:self.rank].to(self.device)
-        # u_sub = u[:self.rank].to(self.device)
-        # u_null = u[self.rank:].to(self.device)
-        # get into complex shape
-        # dim_nb = fns_ops.get_k_radius_grid_points(self.radius).shape[0]
 
         if idx_slice == 0 and self.visualize:
-            # nullspace: reshape and split values
-            # v_null_split_cplx = v_null
-            # dim_ns = v_null_split_cplx.shape[1]
-            # v_null_split_cplx = torch.reshape(v_null_split_cplx, (dim_ns, self.dim_nb, -1))
-            # v_null_split_cplx = v_null_split_cplx[:, :, ::2] + 1j * v_null_split_cplx[:, :, 1::2]
-            # v_null_cplx = torch.reshape(v_null_split_cplx, (dim_ns, -1)).conj().T
-            # plotting.plot_slice(v_null_cplx, name="cplx_nullspace_slice_0", outpath=self.fig_path)
-            # subspace: reshape and split values
-            plotting.plot_slice(eig_vecs[:, :self.rank], name="cplx_subspace_slice_0", outpath=self.fig_path)
+            plotting.plot_slice(v_sub, name="v_sub", outpath=self.fig_path)
 
-        return v_sub.T
+        return v_sub
 
     def _get_m_1_diag_vector(self, f: torch.tensor, v: torch.tensor) -> torch.tensor:
         """
@@ -187,7 +179,6 @@ class ACLoraks(Base):
             log_module.debug("start pcg solve")
 
             in_fhd = torch.flatten(self.fhd[idx_slice]).to(self.device)
-            # in_fhd = torch.flatten(self.fhd[slice_idx]).numpy()
 
             f_slice, residual_abs_sum = self._cgd(in_fhd, vvh)
             self.k_iter_current[idx_slice] = torch.reshape(
