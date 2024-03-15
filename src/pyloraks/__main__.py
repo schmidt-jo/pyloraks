@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 # want a fucntion to wrap the program if not used from CLI but in a pipeline
 def reconstruction(
         config_file: str, output_path: str, input_k: str,
-        input_extra: str = None, input_sampling_mask: str= None,
+        input_extra: str = None, input_sampling_mask: str = None,
         coil_compression: int = 8, read_dir: int = 0,
         aspire_echo_indexes: tuple = (0, 1),
         debug: bool = False, process_slice: bool = False,
@@ -90,7 +90,7 @@ def reconstruction(
     opts = options.Config(
         config_file=config_file, output_path=output_path,
         input_k=input_k, input_extra=input_extra, input_sampling_mask=input_sampling_mask,
-        coil_compression=coil_compression, read_dir=read_dir,    # aspire_echo_indexes=aspire_echo_indexes,
+        coil_compression=coil_compression, read_dir=read_dir,  # aspire_echo_indexes=aspire_echo_indexes,
         debug=debug, process_slice=process_slice, visualize=visualize,
         mode=mode, flavour=flavour,
         rank=rank, radius=radius, lam=lam, lambda_data=lambda_data, conv_tol=conv_tol, max_num_iter=max_num_iter,
@@ -201,26 +201,14 @@ def main(opts: options.Config):
     if opts.read_dir > 0:
         loraks_recon = torch.swapdims(loraks_recon, 0, 1)
 
+    logging.info(f"Save k-space reconstruction")
 
-    loraks_phase = torch.angle(loraks_recon)
-    loraks_phase = torch.mean(loraks_phase, dim=-2)
+    loraks_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    file_name = out_path.joinpath(loraks_name).with_suffix(".pt")
+    logging.info(f"write file: {file_name}")
+    torch.save(loraks_recon, file_name.as_posix())
 
-    loraks_recon_mag = torch.sqrt(
-        torch.sum(
-            torch.square(loraks_recon),
-            dim=-2
-        )
-    )
-    loraks_recon = loraks_recon_mag * torch.exp(1j * loraks_phase)
-    if opts.process_slice:
-        loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
-
-    nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
-    utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon, affine=affine)
-
-    for idx_e in range(3):
-        utils.plot_slice(loraks_recon[:, :, 0, idx_e], name=f"recon_echo-{idx_e+1}", outpath=fig_path)
-
+    logging.info(f"save optimizer loss plot")
     # quick plot of residual sum
     fig = go.Figure()
     for idx_slice in range(solver.dim_slice):
@@ -231,6 +219,38 @@ def main(opts: options.Config):
     logging.info(f"write file: {fig_name}")
     fig.write_html(fig_name.as_posix())
 
+    logging.info("FFT into image space")
+    # fft into real space
+    loraks_recon_img = torch.fft.fftshift(
+        torch.fft.fft(
+            torch.fft.ifftshift(
+                loraks_recon, dim=(0, 1)
+            ),
+            dim=(0, 1)
+        ),
+        dim=(0, 1)
+    )
+
+    logging.info("rSoS channels")
+    # for nii we rSoS combine channels
+    loraks_recon_mag = torch.sqrt(
+        torch.sum(
+            torch.square(
+                torch.abs(loraks_recon_img)
+            ),
+            dim=-2
+        )
+    )
+
+    loraks_phase = torch.angle(loraks_recon)
+    loraks_phase = torch.mean(loraks_phase, dim=-2)
+
+    loraks_recon_img = loraks_recon_mag * torch.exp(1j * loraks_phase)
+    if opts.process_slice:
+        loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
+
+    nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_img, affine=affine)
     # if opts.visualize:
     #     logging.debug(f"reshape to k-space and plot")
     #     # choose some slice
