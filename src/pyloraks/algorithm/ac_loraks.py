@@ -50,8 +50,10 @@ class ACLoraks(Base):
             a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
             b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
             # lets look for the ACS which is constant across the joint dimension and the neighborhood
+            # we check the mask for it, irrespective of the combined dimension, its usually sampled different
+            # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
             c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
-            idxs_ac = (c == self.dim_nb * self.dim_t_ch * 2)
+            idxs_ac = (c == a.shape[1] * a.shape[2])
             # now we build the s_matrix with the 0 filled data
             s_mac_k_in = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
             s_matrix = self.op_x.operator(k_space=s_mac_k_in)
