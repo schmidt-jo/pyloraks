@@ -79,20 +79,21 @@ class Base:
         self.fig_path: plib.Path = fig_path
 
         if self.visualize:
+            log_module.debug(f"Plotting P*P")
             plotting.plot_slice(
                 torch.reshape(self.p_star_p, (self.dim_phase, self.dim_phase)),
                 name="p_star_p", outpath=self.fig_path,
             )
-
-        #     logging.debug(f"look at undersampled data")
-        #     plot_d = torch.reshape(self.fhd[int(self.dim_slice/2), :, 0, 0], (self.dim_read, self.dim_phase))
-        #     plotting.plot_img(img_tensor=plot_d.clone().detach().cpu(), log_mag=True,
-        #                       out_path=self.fig_path, name=f"us_k_space")
-        #     d_sl_us_img_recon = torch.fft.ifftshift(torch.fft.ifft2(torch.fft.fftshift(plot_d)))
-        #     plotting.plot_img(img_tensor=d_sl_us_img_recon.clone().detach().cpu(),
-        #                       out_path=self.fig_path, name="naive_us_recon")
-        #     plotting.plot_img(img_tensor=torch.reshape(self.fhf[:, 0], (self.dim_read, self.dim_phase)),
-        #                       out_path=self.fig_path, name="fhf")
+            log_module.debug(f"Plotting fhf and fhd")
+            for idx_e in range(min(self.dim_echoes, 3)):
+                plotting.plot_slice(
+                    torch.reshape(self.fhf[:,idx_e], (self.dim_read, self.dim_phase)),
+                    f"fhf_e-{idx_e+1}", outpath=self.fig_path
+                )
+                plotting.plot_slice(
+                    torch.reshape(self.fhd[0, :, 0, idx_e], (self.dim_read, self.dim_phase)),
+                    f"fhd_sli-0_ch-0_e-{idx_e+1}", outpath=self.fig_path
+                )
 
     def reconstruct(self):
         log_module.info(f"start processing")

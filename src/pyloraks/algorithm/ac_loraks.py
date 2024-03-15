@@ -25,8 +25,16 @@ class ACLoraks(Base):
         log_module.debug(f"Setup AC LORAKS specifics")
         self.fft_algorithm: bool = fft_algorithm
         # compute aha - stretch along channels
-        self.aha = torch.flatten(torch.repeat_interleave(self.fhf, self.dim_channels, dim=-1)
-                                 + self.lam * self.p_star_p[:, None]).to(self.device)
+        # self.aha = torch.flatten(
+        #     torch.repeat_interleave(
+        #         self.fhf, self.dim_channels, dim=-1
+        #     ) + self.lam * self.p_star_p[:, None]
+        # ).to(self.device)      # -> as in matlab version multiplying with psp
+        self.aha = torch.flatten(
+            torch.repeat_interleave(
+                self.fhf, self.dim_channels, dim=-1
+            )
+        ).to(self.device)
 
     def get_acs_v(self, idx_slice: int):
         """
@@ -53,16 +61,16 @@ class ACLoraks(Base):
             # we check the mask for it, irrespective of the combined dimension, its usually sampled different
             # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
             c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
-            idxs_ac = (c == a.shape[1] * a.shape[2])
+            idxs_ac = torch.tile((c == a.shape[1] * a.shape[2] * 2), dims=(2,))
             # now we build the s_matrix with the 0 filled data
             s_mac_k_in = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
             s_matrix = self.op_x.operator(k_space=s_mac_k_in)
             # and keep only the fully populated rows
-            m_ac = s_matrix[torch.tile(idxs_ac, dims=(2,))]
+            m_ac = s_matrix[idxs_ac]
             if idx_slice == 0 and self.visualize:
                 # plot the found acs for reference
                 acs = torch.zeros_like(s_matrix)
-                acs[torch.tile(idxs_ac, dims=(2,))] = 1
+                acs[idxs_ac] = 1
                 acs = self.op_x.operator_adjoint(acs)
                 acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
                 plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
