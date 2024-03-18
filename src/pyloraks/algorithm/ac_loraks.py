@@ -26,12 +26,7 @@ class ACLoraks(Base):
         self.fft_algorithm: bool = fft_algorithm
         # compute aha - stretch along channels
         fhf = self.fhf[:, None, :].expand((-1, self.dim_channels, -1))
-        self.aha = torch.flatten(fhf + self.lam * self.p_star_p[:, None, None]).to(self.device)      # -> as in matlab version multiplying with psp
-        # self.aha = torch.flatten(
-        #     torch.repeat_interleave(
-        #         self.fhf, self.dim_channels, dim=-1
-        #     )
-        # ).to(self.device)
+        self.aha = torch.flatten(fhf + self.lam * self.p_star_p[:, None, None]).to(self.device)
 
     def get_acs_v(self, idx_slice: int):
         """
@@ -81,17 +76,12 @@ class ACLoraks(Base):
             raise ValueError(err)
         if torch.cuda.is_available():
             m_ac = m_ac.to(torch.device("cuda:0"))
-        # # evaluate nullspace
-        # via svd
-        # u, s, v = torch.linalg.svd(m_ac, full_matrices=False)
-        # v_sub = v[:self.rank].to(self.device).T
-        # m_ac_rank = v.shape[1]
 
         # via eigh
         eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
         m_ac_rank = eig_vals.shape[0]
         # get subspaces from svd of subspace matrix
-        eig_vals, idxs = torch.sort(eig_vals, descending=True)
+        eig_vals, idxs = torch.sort(torch.abs(eig_vals), descending=True)
         # eig_vecs_r = eig_vecs[idxs]
         eig_vecs = eig_vecs[:, idxs]
         # v_sub_r = eig_vecs_r[:self.rank].to(self.device)
@@ -121,7 +111,7 @@ class ACLoraks(Base):
                 )
             )
         )
-        return m1_fhf + self.lam * m1_v
+        return m1_fhf - self.lam * m1_v
 
     def _solve_fft(self):
         """
@@ -136,37 +126,61 @@ class ACLoraks(Base):
         """
         pass
 
-    def _cgd(self, fhd, v):
-        residual_abs_sum = []
-        # get starting value of f
-        f = fhd.clone()
-        # starting value of rhs is also fhd
-        f_rand = torch.rand_like(f) * 1e-2
-        f[torch.abs(f) < 1e-6] = f_rand[torch.abs(f) < 1e-6]
-        # get matrix (is only a vector, matrix would be a diagonal matrix, hence we save memory here)
+    def _cgd(self, b, v):
+        n2b = torch.linalg.norm(b)
 
-        # get residual
-        r = fhd - self._get_m_1_diag_vector(f, v)
-        # get vars
-        z = r.clone()
+        x = torch.zeros_like(b)
+        p = 1
+        xmin = x
+        tolb = self.conv_tol * n2b
 
-        for i in tqdm.trange(self.max_num_iter, desc="Processing::Slice::Iteration"):
-            rr = torch.dot(r, r)
-            residual_abs_sum.append(torch.abs(rr))
-            if torch.abs(rr) < self.conv_tol:
-                log_module.info("Convergence reached!")
+        r = b - self._get_m_1_diag_vector(x, v)
+
+        normr = torch.linalg.norm(r)
+        normr_act = normr
+
+        if normr < tolb:
+            log_module.info("convergence before loop")
+
+        res_vec = torch.zeros(self.max_num_iter)
+        normrmin = normr
+
+        rho = 1
+
+        for ii in tqdm.trange(self.max_num_iter):
+            z = r
+            rho1 = rho
+            rho = torch.abs(torch.sum(r.conj() * r))
+            if ii == 0:
+                p = z
+            else:
+                beta = rho / rho1
+                p = z + beta * p
+            q = self._get_m_1_diag_vector(p, v)
+            pq = torch.sum(p.conj() * q)
+            alpha = rho / pq
+
+            x = x + alpha * p
+            r = r - alpha * q
+
+            normr = torch.linalg.norm(r)
+            normr_act = normr
+            res_vec[ii] = normr
+
+            if normr <= tolb:
+                r = b - self._get_m_1_diag_vector(x, v)
+                normr_act = torch.linalg.norm(r)
+                res_vec[ii] = normr_act
+                log_module.info(f"reached convergence at step {ii + 1}")
                 break
 
-            az = self._get_m_1_diag_vector(z, v)
-            zaz = torch.dot(z, az)
-            a = torch.div(rr, zaz)
-            f = f + a * z
-            r_new = r - a * az
-            rr_new = torch.dot(r_new, r_new)
-            beta = rr_new / rr
-            z = r_new + beta * z
-            r = r_new
-        return f, residual_abs_sum
+            if normr_act < normrmin:
+                normrmin = normr_act
+                xmin = x
+                iimin = ii
+                log_module.info(f"min residual {normrmin:.2f}, at {iimin + 1}")
+
+        return xmin, res_vec
 
     def _recon(self):
         """
@@ -196,29 +210,4 @@ class ACLoraks(Base):
 
             # ToDo implement different algorithmic choices here:
             #  multiplicative Majorize-Minimize Approach - FFT version, start with fft
-            # if self.fft_algorithm:
-            #     self._solve_fft()
-            # else
-            #     self._solve()
-            # try:
-            # loraks_solve = ssl.cg(
-            #     M1, in_fhd, x0=in_fhd, tol=1e-9, atol=1e-5,
-            #     maxiter=self.opts.max_num_iter, callback=cg_counter
-            # )
-            # f = torch.rand_like(in_fhd)
-            # for _ in tqdm.trange(self.max_num_iter, desc="loraks solve iteration"):
-            #     f_last = f
-            #     xs = self.cgd(
-            #         input_f=f, input_fhd=in_fhd, vvh=vvh
-            #     )
-            #     convergence = torch.linalg.norm(xs[1:] - xs[:-1], dim=-1)
-            #     log_module.info(f"convergence: {convergence}")
-            #     f = xs[-1]
-            #
-            # loraks_solve = torch.from_numpy(loraks_solve[0])
-            # # except SmallEnoughException:
-            # #     loraks_solve = cg_counter.last_iterate
-            # self.k_iter_current[idx_slice] = torch.reshape(
-            #     loraks_solve,
-            #     (self.dim_s, self.dim_channels, self.dim_echoes)
-            # )
+
