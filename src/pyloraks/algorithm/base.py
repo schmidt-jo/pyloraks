@@ -81,7 +81,7 @@ class Base:
         if self.visualize:
             log_module.debug(f"Plotting P*P")
             plotting.plot_slice(
-                torch.reshape(self.p_star_p, (self.dim_phase, self.dim_phase)),
+                torch.reshape(self.p_star_p, (self.dim_read, self.dim_phase)),
                 name="p_star_p", outpath=self.fig_path,
             )
             log_module.debug(f"Plotting fhf and fhd")
