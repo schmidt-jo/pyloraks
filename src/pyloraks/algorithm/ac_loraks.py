@@ -27,45 +27,59 @@ class ACLoraks(Base):
         # compute aha - stretch along channels
         fhf = self.fhf[:, None, :].expand((-1, self.dim_channels, -1))
         self.aha = torch.flatten(fhf + self.lam * self.p_star_p[:, None, None]).to(self.device)
+        # recon takes place per slice for combined echo and channel dimensions.
+        # we can thus find the AC region and save it to not redo the computation each slice
+        # we save the indices of mapped vectors to op matrix after finding which neighborhoods are
+        # completely mapped into the operator matrix
+        self.idxs_ac: torch.tensor = self._find_ac_indices()
+
+    def _find_ac_indices(self):
+        # we can use the sampling mask, rebuild it in 2d, sampling pattern equal per coil but different per echo
+        mask = torch.reshape(self.fhf, (self.dim_read, self.dim_phase, self.dim_echoes))
+        # momentarily the implementation is aiming at joint echo recon. we use all echoes,
+        # but might need to batch the channel dimensions. in the nullspace approx we use all data
+        # get indices for centered origin k-space
+        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.point_sym_nb_coos
+        # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
+        a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
+        b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
+        # lets look for the ACS which is constant across the joint dimension and the neighborhood
+        # we check the mask for it, irrespective of the combined dimension, its usually sampled different
+        # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
+        c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
+        idxs_ac = torch.tile((c == a.shape[1] * a.shape[2] * 2), dims=(2,))
+        # plot extracted region if flag set
+        if self.visualize:
+            # plot the found acs for reference
+            dim = self.dim_nb * self.dim_t_ch
+            if self.mode in ["s", "S"]:
+                dim *= 2
+            acs = torch.zeros((idxs_ac.shape[0], dim))
+            acs[idxs_ac] = 1
+            acs = self.op_x.operator_adjoint(acs)
+            acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
+            plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
+        # return the found indices
+        return idxs_ac
 
     def get_acs_v(self, idx_slice: int):
         """
         Compute the V matrix for solving the AC LORAKS formulation from autocalibration data.
         We need to find the ACS data first and then evaluate the nullspace subspace.
         """
-        if self.mode == "c" or self.mode == "C":
+        if self.mode in ["c", "C"]:
             # want submatrix of respecitve loraks matrix with fully populated rows
             c_idx = self.op_x.operator(k_space=self.fhf)
             idxs = torch.nonzero(torch.sum(c_idx, dim=1) == c_idx.shape[1])
             # build X matrix from k-space
             m_ac = self.op_x.operator(k_space=self.k_space_input[idx_slice])[idxs]
-        elif self.mode == "s" or self.mode == "S":
-            # we can use the sampling mask, rebuild it in 2d
-            mask = torch.reshape(self.fhf, (self.dim_read, self.dim_phase, self.dim_echoes))
-            # momentarily the implementation is aiming at joint echo recon. we use all echoes,
-            # but might need to batch the channel dimensions. in the nullspace approx we use all data
-            # get indices for centered origin k-space
-            p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.point_sym_nb_coos
-            # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
-            a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
-            b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
-            # lets look for the ACS which is constant across the joint dimension and the neighborhood
-            # we check the mask for it, irrespective of the combined dimension, its usually sampled different
-            # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
-            c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
-            idxs_ac = torch.tile((c == a.shape[1] * a.shape[2] * 2), dims=(2,))
-            # now we build the s_matrix with the 0 filled data
+        elif self.mode in ["s", "S"]:
+            # now we build the s_matrix with the 0 filled data for the current slice
             s_mac_k_in = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
             s_matrix = self.op_x.operator(k_space=s_mac_k_in)
-            # and keep only the fully populated rows
-            m_ac = s_matrix[idxs_ac]
-            if idx_slice == 0 and self.visualize:
-                # plot the found acs for reference
-                acs = torch.zeros_like(s_matrix)
-                acs[idxs_ac] = 1
-                acs = self.op_x.operator_adjoint(acs)
-                acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
-                plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
+            # and keep only the fully populated rows - we calculated which those are already for all
+            # echo sampling patterns
+            m_ac = s_matrix[self.idxs_ac]
         else:
             err = f"ACS calibration not implemented (yet) for mode {self.mode}. Choose either c or s"
             log_module.error(err)
@@ -132,6 +146,7 @@ class ACLoraks(Base):
         x = torch.zeros_like(b)
         p = 1
         xmin = x
+        iimin = 0
         tolb = self.conv_tol * n2b
 
         r = b - self._get_m_1_diag_vector(x, v)
@@ -178,9 +193,9 @@ class ACLoraks(Base):
                 normrmin = normr_act
                 xmin = x
                 iimin = ii
-                log_module.info(f"min residual {normrmin:.2f}, at {iimin + 1}")
+                log_module.debug(f"min residual {normrmin:.2f}, at {iimin + 1}")
 
-        return xmin, res_vec
+        return xmin, res_vec, {"norm_res_min": normrmin, "iteration": iimin}
 
     def _recon(self):
         """
@@ -201,13 +216,13 @@ class ACLoraks(Base):
 
             in_fhd = torch.flatten(self.fhd[idx_slice]).to(self.device)
 
-            f_slice, residual_abs_sum = self._cgd(in_fhd, vvh)
+            f_slice, residual_abs_sum, stats = self._cgd(in_fhd, vvh)
             self.k_iter_current[idx_slice] = torch.reshape(
                 f_slice,
                 (-1, self.dim_channels, self.dim_echoes)
             )
-            self.iter_residuals[idx_slice, :len(residual_abs_sum)] = torch.tensor(residual_abs_sum)
-
+            self.iter_residuals[idx_slice, :len(residual_abs_sum)] = residual_abs_sum.clone().cpu()
+            self.stats = stats
             # ToDo implement different algorithmic choices here:
             #  multiplicative Majorize-Minimize Approach - FFT version, start with fft
 

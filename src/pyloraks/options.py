@@ -62,7 +62,7 @@ class Config(sp.Serializable):
     )
 
     mode: str = sp.field(
-        choices=["s", "S", "c", "C", "g", "G"], alias="-m", default="s",
+        choices=["s", "S", "c", "C", "g", "G", "combined"], alias="-m", default="s",
         help=f"LORAKS mode."
     )
     flavour: str = sp.field(
@@ -79,6 +79,8 @@ class Config(sp.Serializable):
     max_num_iter: int = sp.field(alias="-mni", default=10)
 
     batch_size: int = sp.field(alias="-b", default=4)
+    use_gpu: bool = sp.field(alias="-gpu", default=False)
+    gpu_device: int = sp.field(alias="-gpud", default=0)
     wandb: bool = sp.field(alias="-wb", default=False)
 
     @classmethod

@@ -65,7 +65,8 @@ class Base:
         # and first iterations would just regress to fhd, hence we can init fhd from the get go
         self.k_iter_current: torch.tensor = self.fhd.clone().detach()
         self.iter_residuals: torch.tensor = torch.zeros((self.dim_slice, self.max_num_iter))
-
+        # get a dict with residuals and iteration
+        self.stats: dict = {}
         # get operator
         self.op_x: fns_ops.S | fns_ops.G | fns_ops.C = fns_ops.get_operator_from_mode(
             mode=self.mode, k_space_dims=self.k_space_dims, radius=self.radius)
@@ -98,11 +99,17 @@ class Base:
     def reconstruct(self):
         log_module.info(f"start processing")
         self._recon()
+
+    def get_k_space(self):
         # move slice dim back, dims [z, xy, ch, t]
         k_space_recon = torch.moveaxis(self.k_iter_current, 0, 1)
         # reshape to original input dims [xy, z, ch, t]
         k_space_recon = torch.reshape(k_space_recon, self.k_space_dims)
+
         return k_space_recon
+
+    def get_residuals(self) -> (torch.tensor, dict):
+        return self.iter_residuals, self.stats
 
     @abc.abstractmethod
     def _recon(self):

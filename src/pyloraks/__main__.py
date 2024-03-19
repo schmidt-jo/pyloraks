@@ -1,9 +1,9 @@
 import logging
-import wandb
 from pyloraks import options, utils, algorithm
 import torch
 import pathlib as plib
 import plotly.graph_objects as go
+import wandb
 
 
 # want a fucntion to wrap the program if not used from CLI but in a pipeline
@@ -99,19 +99,10 @@ def reconstruction(
     main(opts)
 
 
-def main(opts: options.Config):
+def setup_data(opts: options.Config):
     logging.info(f"___ Loraks Reconstruction ___")
     logging.info(f"{opts.flavour}; Rank - {opts.rank}; Radius - {opts.radius}; "
                  f"Lambda - {opts.lam}; mode - {opts.mode}; coil compression - {opts.coil_compression}")
-    out_path = plib.Path(opts.output_path).absolute()
-    fig_path = out_path.joinpath("plots/")
-    if opts.visualize:
-        fig_path.mkdir(parents=True, exist_ok=True)
-
-    # set up device
-    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cuda:0")
-    torch.manual_seed(0)
 
     logging.debug("Load data")
     k_space, affine, sampling_pattern = utils.load_data(
@@ -173,6 +164,25 @@ def main(opts: options.Config):
             )
         )
     )
+    return k_space, f_indexes, affine
+
+
+def main(opts: options.Config):
+    # setup
+    out_path = plib.Path(opts.output_path).absolute()
+    fig_path = out_path.joinpath("plots/")
+    if opts.visualize:
+        fig_path.mkdir(parents=True, exist_ok=True)
+
+    # set up device
+    if opts.use_gpu:
+        logging.info(f"configuring gpu::  cuda:{opts.gpu_device}")
+        device = torch.device(f"cuda:{opts.gpu_device}")
+    else:
+        device = torch.device("cpu")
+    torch.manual_seed(0)
+
+    k_space, f_indexes, affine = setup_data(opts=opts)
 
     # ToDo: Want to set all matrices used throughout different algorithms / flavors as object
     # ToDo: chose algorithm / flavor, send object and execute
@@ -184,42 +194,40 @@ def main(opts: options.Config):
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
         fft_algorithm=False, device=device, fig_path=fig_path
     )
-    loraks_recon = solver.reconstruct()
+    solver.reconstruct()
 
-    # ToDo implement aspire phase reconstruction
-    # np_loraks_k_space_recon = loraks_k_vector.numpy(force=True)
-    # np_loraks_mag, np_loraks_phase, _ = recon_fns.fft_mag_sos_phase_aspire_recon(
-    #     k_data_xyz_ch_t=np_loraks_k_space_recon, se_indices=opts.aspire_echo_indexes
-    # )
-    # loraks_img = torch.from_numpy(np_loraks_mag) * torch.exp(1j * torch.from_numpy(np_loraks_phase))
-
-    # move back first axis to where read was
-    # loraks_img = fns_ops.shift_read_dir(loraks_img, read_dir=opts.read_dir, forward=False)
-    # rearranging x, y, z, t
-
-    # switch back
-    if opts.read_dir > 0:
-        loraks_recon = torch.swapdims(loraks_recon, 0, 1)
-
-    logging.info(f"Save k-space reconstruction")
-
-    loraks_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
-    file_name = out_path.joinpath(loraks_name).with_suffix(".pt")
-    logging.info(f"write file: {file_name}")
-    torch.save(loraks_recon, file_name.as_posix())
-
+    # print stats
+    residuals, stats = solver.get_residuals()
+    logging.info(f"Minimum residual l2: {stats['norm_res_min']:.3f}")
     logging.info(f"save optimizer loss plot")
     # quick plot of residual sum
     fig = go.Figure()
     for idx_slice in range(solver.dim_slice):
         fig.add_trace(
-            go.Scattergl(y=solver.iter_residuals[idx_slice], name=f"slice: {idx_slice}")
+            go.Scattergl(y=residuals[idx_slice], name=f"slice: {idx_slice}")
         )
     fig_name = out_path.joinpath(f"residuals.html")
     logging.info(f"write file: {fig_name}")
     fig.write_html(fig_name.as_posix())
 
-    #save recon as nii for now to look at
+    # get k-space
+    loraks_recon = solver.get_k_space()
+    # ToDo implement aspire phase reconstruction
+
+    # switch back
+    if opts.read_dir > 0:
+        loraks_recon = torch.swapdims(loraks_recon, 0, 1)
+
+    if opts.process_slice:
+        loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
+
+    logging.info(f"Save k-space reconstruction")
+    loraks_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    file_name = out_path.joinpath(loraks_name).with_suffix(".pt")
+    logging.info(f"write file: {file_name}")
+    torch.save(loraks_recon, file_name.as_posix())
+
+    # save recon as nii for now to look at
     # rSoS k-space-data for looking at it
     loraks_recon_mag = torch.sqrt(
         torch.sum(
@@ -268,11 +276,55 @@ def main(opts: options.Config):
     loraks_phase = torch.mean(loraks_phase, dim=-2)
 
     loraks_recon_img = loraks_recon_mag * torch.exp(1j * loraks_phase)
-    if opts.process_slice:
-        loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
 
     nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
     utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_img, affine=affine)
+
+
+def optimize_loraks_params():
+    # wandb.init()
+    # load opts
+    opts = options.Config.load(
+        "/data/pt_np-jschmidt/data/00_phantom_scan_data/pulseq_2024-03-07_megesse-mese-acc-test/"
+        "processed/pyloraks/wandb/pyloraks_config.json"
+    )
+    # setup
+    out_path = plib.Path(opts.output_path).absolute()
+    fig_path = out_path.joinpath("plots/")
+    if opts.visualize:
+        fig_path.mkdir(parents=True, exist_ok=True)
+
+    # set up device
+    if opts.use_gpu:
+        logging.info(f"configuring gpu::  cuda:{opts.gpu_device}")
+        device = torch.device(f"cuda:{opts.gpu_device}")
+    else:
+        device = torch.device("cpu")
+    torch.manual_seed(0)
+
+    k_space, f_indexes, _ = setup_data(opts=opts)
+
+    # get loraks params from wandb
+    # loraks_radius = wandb.config["radius"]
+    # loraks_rank = wandb.config["rank"]
+    # loraks_lambda = wandb.config["lambda"]
+    loraks_radius = 3
+    loraks_rank = 150
+    loraks_lambda = 0.2
+
+    # recon sos and phase coil combination
+    solver = algorithm.ACLoraks(
+        k_space_input=k_space, mask_indices_input=f_indexes,
+        mode=opts.mode, radius=loraks_radius, rank=loraks_rank, lam=loraks_lambda,
+        max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
+        fft_algorithm=False, device=device, fig_path=fig_path, visualize=opts.visualize
+    )
+    solver.reconstruct()
+
+    # get stats and min residual norm
+    residual_vector, stats = solver.get_residuals()
+    logging.info(f"Finished Run. Min l2 residual norm: {stats['norm_res_min']:3f}")
+    # wandb.log({"res_min": stats["norm_res_min"]})
 
 
 if __name__ == '__main__':
@@ -286,9 +338,7 @@ if __name__ == '__main__':
         level = logging.DEBUG
     else:
         level = logging.INFO
-        if config.wandb:
-            # setup wandb
-            wandb.init()
+
     logging.basicConfig(format='%(asctime)s %(levelname)s :: %(name)s -- %(message)s',
                         datefmt='%I:%M:%S', level=level)
 
@@ -296,7 +346,12 @@ if __name__ == '__main__':
     logging.info(f"___ PyLORAKS reconstruction ___")
     logging.info(f"_______________________________")
     try:
-        main(opts=config)
+        if config.wandb:
+            # setup wandb
+            wandb.init()
+            optimize_loraks_params()
+        else:
+            main(opts=config)
     except Exception as e:
         logging.exception(e)
         parser.print_usage()
