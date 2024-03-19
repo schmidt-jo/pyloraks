@@ -140,22 +140,18 @@ class C(LoraksOperator):
         :param k_space: flattened k_space vector
         :return: C matrix, dims [(kx - 2R)*(ky - 2R)
         """
+        # get k-space indexes
         k_pts = self._get_k_space_pt_idxs()
-        k_space = torch.reshape(k_space, self.k_space_dims)
-        # find m -> index for row in matrix,
-        # basically just the index of the flattened array minus the non-contained edges
-        m = ((k_pts[:, 0] - self.radius) * (self.k_space_dims[1] - 2 * self.radius) +
-             k_pts[:, 1] - self.radius).to(torch.int)
-        # find p -> index of column in matrix, this is cycling through all neighborhood points within radius,
-        # the 2D set of neighborhood pts are flattened along this dimension
-        kn_pts = get_k_radius_grid_points(radius=self.radius).to(m.device)
-        p_nx_ny = (k_pts[:, None] + kn_pts[None, :]).to(torch.int)
-        # allocate space for c_matrix
-        c_matrix = torch.zeros(
-            (int((self.k_space_dims[0] - 2 * self.radius) * (self.k_space_dims[1] - 2 * self.radius)), kn_pts.shape[0]),
-            dtype=torch.complex128, device=k_space.device
-        )
-        c_matrix[m] = k_space[p_nx_ny[:, :, 0], p_nx_ny[:, :, 1]]
+        # get neighborhood pts
+        kn_pts = get_k_radius_grid_points(radius=self.radius)
+        # put k_space back into 2D slice and 3rd dim is concatenated t-ch
+        k_space = torch.reshape(k_space, (self.k_space_dims[0], self.k_space_dims[1], -1))
+        # build indices
+        p_nb_nx_ny = (k_pts[:, None] + kn_pts[None, :]).to(torch.int)
+        # extract from matrix
+        c_matrix = k_space[p_nb_nx_ny[:, :, 0], p_nb_nx_ny[:, :, 1]]
+        # now we want the neighborhoods of individual t-ch info to be concatenated into the neighborhood axes.
+        c_matrix = torch.reshape(torch.movedim(c_matrix, -1, 1), (c_matrix.shape[0], -1))
         return c_matrix
 
     def _adjoint(self, x_matrix: torch.tensor) -> torch.tensor:
@@ -164,31 +160,33 @@ class C(LoraksOperator):
         :param x_matrix:
         :return: flattened k-space vector
         """
-        # for every column (aka neighborhood entry in 2D)
-        # we can map a lower sized image to the full range using the neighborhood index as starting point
-        # allocate
-        k_space = torch.zeros(self.k_space_dims, device=x_matrix.device, dtype=torch.complex128)
+        # get k-space indexes
+        k_pts = self._get_k_space_pt_idxs()
+        # get neighborhood pts
+        kn_pts = get_k_radius_grid_points(radius=self.radius)
+        # build indices
+        p_nb_nx_ny_idxs = (k_pts[:, None] + kn_pts[None, :]).to(torch.int)
         if x_matrix.shape[0] < x_matrix.shape[1]:
             # want neighborhood dim to be in column
             x_matrix = x_matrix.T
-        # go through columns of c, each column can be depicted as a shape_x - 2* radius X shape_y - 2 * radius image
-        # get c dimensions
-        m, p = x_matrix.shape
-        # get img dimensions
-        d_kx = self.k_space_dims[0] - 2 * self.radius
-        d_ky = self.k_space_dims[1] - 2 * self.radius
-        # get index points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
-        for nb_idx in range(p):
-            # we get a k_space_dim - 2R side length rectangular image for every column index
-            # which we can add to the result
-            col_img = torch.reshape(x_matrix[:, nb_idx], (d_kx, d_ky))
-            # add to result
-            k_space[
-            self.radius + kn_pts[nb_idx, 0]: self.radius + kn_pts[nb_idx, 0] + d_kx,
-            self.radius + kn_pts[nb_idx, 1]: self.radius + kn_pts[nb_idx, 1] + d_ky
-            ] += col_img
-        return k_space
+        # store shapes
+        sm, sk = x_matrix.shape
+        # get dims
+        nb = p_nb_nx_ny_idxs.shape[1]
+        n_tch = int(sk / nb)
+        # extract sub-matrices - they are concatenated in neighborhood dimension for all t-ch images
+        t_ch_idxs = torch.arange(nb)[:, None] + torch.arange(n_tch)[None, :] * nb
+        x_matrix = x_matrix[:, t_ch_idxs]
+
+        # build k_space
+        k_space_recon = torch.zeros((*self.k_space_dims[:2], n_tch), dtype=torch.complex128).to(x_matrix.device)
+        # # fill k_space
+        log_module.debug(f"build k-space from c-matrix")
+        for idx_nb in range(nb):
+            k_space_recon[
+                p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]
+            ] += x_matrix[:, idx_nb]
+        return torch.reshape(k_space_recon, (-1, n_tch))
 
 
 class S(LoraksOperator):
@@ -224,43 +222,6 @@ class S(LoraksOperator):
         )
         # now we want the neighborhoods of individual t-ch info to be concatenated into the neighborhood axes.
         s_matrix = torch.reshape(torch.movedim(s_matrix, -1, 1), (s_matrix.shape[0], -1))
-        return s_matrix
-
-    def _operator_halfspaces(self, k_space: torch.tensor) -> torch.tensor:
-        # input k space always 2d [xy, t_ch]
-        # get neighborhood points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
-        # get indices for centered origin k-space
-        m_nx_ny_idxs, p_nx_ny_idxs = self._get_half_space_k_dims()
-        # build neighborhoods on both sides
-        p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
-        m_nb_nx_ny_idxs = m_nx_ny_idxs[:, None] + kn_pts[None, :]
-        # get dimensions
-        xy = k_space.shape[0]
-        nb = kn_pts.shape[0]
-        tch = k_space.shape[-1]
-        nb_tch = nb * tch  # added channel and time dimensions
-        # need to separate xy dims
-        k_space = torch.reshape(k_space, (self.k_space_dims[0], self.k_space_dims[1], -1))
-        # build S matrix
-        s_rp = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_rm = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_ip = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        s_im = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.float64, device=k_space.device)
-        log_module.debug(f"build s matrix")
-        ts = torch.arange(tch) * nb
-        for idx_nb in range(nb):
-            s_rp[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]].real
-            s_rm[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]].real
-            s_ip[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]].imag
-            s_im[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]].imag
-
-        s_matrix = torch.concatenate(
-            (
-                torch.concatenate([s_rp - s_rm, -s_ip + s_im], dim=1),
-                torch.concatenate([s_ip + s_im, s_rp + s_rm], dim=1)
-            ), dim=0
-        )
         return s_matrix
 
     def _adjoint(self, x_matrix: torch.tensor) -> torch.tensor:
@@ -301,81 +262,6 @@ class S(LoraksOperator):
                 m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]
             ] += srm[:, idx_nb] + 1j * sim[:, idx_nb]
         return torch.reshape(k_space_recon, (-1, n_tch))
-
-    def _adjoint_rxv(self, x_matrix: torch.tensor) -> torch.tensor:
-        device = x_matrix.device
-        # get neighborhood points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
-        # build neighborhood
-        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.get_point_symmetric_neighborhoods()
-        # store shapes
-        sm, sk = x_matrix.shape
-        # extract sub-matrices - they are concatenated in neighborhood dimension for all t-ch images
-
-        srp_m_srm = x_matrix[:int(sm / 2), :int(sk / 2)]
-        msip_p_sim = x_matrix[:int(sm / 2), int(sk / 2):]
-        sip_p_sim = x_matrix[int(sm / 2):, :int(sk / 2)]
-        srp_p_srm = x_matrix[int(sm / 2):, int(sk / 2):]
-        # extract sub-sub
-        srp = srp_m_srm + srp_p_srm
-        srm = - srp_m_srm + srp_p_srm
-        sip = sip_p_sim - msip_p_sim
-        sim = msip_p_sim + sip_p_sim
-
-        # build k_space
-        nb = kn_pts.shape[0]
-        last_dim = int(sk / 2 / nb)
-        k_space_recon = torch.zeros((*self.k_space_dims[:2], last_dim), dtype=torch.complex128).to(device)
-        # fill k_space
-        ts = torch.arange(last_dim) * nb
-        log_module.debug(f"build k-space from s-matrix")
-        for idx_nb in range(nb):
-            k_space_recon[
-                p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]
-            ] += srp[:, ts + idx_nb] + 1j * sip[:, ts + idx_nb]
-            k_space_recon[
-                m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]
-            ] += srm[:, ts + idx_nb] + 1j * sim[:, ts + idx_nb]
-        return torch.reshape(k_space_recon, (-1, last_dim))
-
-    def _adjoint_halspaces(self, x_matrix: torch.tensor) -> torch.tensor:
-        device = x_matrix.device
-        # get neighborhood points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
-        # get indices for centered origin k-space
-        m_nx_ny_idxs, p_nx_ny_idxs = self._get_half_space_k_dims()
-        # build neighborhoods on both sides
-        p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
-        m_nb_nx_ny_idxs = m_nx_ny_idxs[:, None] + kn_pts[None, :]
-
-        # store shapes
-        sm, sk = x_matrix.shape
-        # extract sub-matrices
-        srp_m_srm = x_matrix[:int(sm / 2), :int(sk / 2)]
-        msip_p_sim = x_matrix[:int(sm / 2), int(sk / 2):]
-        sip_p_sim = x_matrix[int(sm / 2):, :int(sk / 2)]
-        srp_p_srm = x_matrix[int(sm / 2):, int(sk / 2):]
-        # extract sub-sub
-        srp = srp_m_srm / 2 + srp_p_srm / 2
-        srm = - srp_m_srm / 2 + srp_p_srm / 2
-        sip = sip_p_sim / 2 - msip_p_sim / 2
-        sim = msip_p_sim / 2 + sip_p_sim / 2
-
-        # build k_space
-        nb = kn_pts.shape[0]
-        last_dim = int(sk / 2 / nb)
-        k_space_recon = torch.zeros((*self.k_space_dims[:2], last_dim), dtype=torch.complex128).to(device)
-        # fill k_space
-        ts = torch.arange(last_dim) * nb
-        log_module.debug(f"build k-space from s-matrix")
-        for idx_nb in range(nb):
-            k_space_recon[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]] += srp[:,
-                                                                                           ts + idx_nb] + 1j * sip[:,
-                                                                                                               ts + idx_nb]
-            k_space_recon[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]] += srm[:,
-                                                                                           ts + idx_nb] + 1j * sim[:,
-                                                                                                               ts + idx_nb]
-        return torch.reshape(k_space_recon, (-1, last_dim))
 
     def get_half_space_k_dims(self):
         return self._get_half_space_k_dims()

@@ -15,7 +15,8 @@ log_module = logging.getLogger(__name__)
 
 class Base:
     def __init__(self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
-                 mode: str, radius: int, rank: int, lam: float, max_num_iter: int, conv_tol: float,
+                 mode: str, radius: int, max_num_iter: int, conv_tol: float,
+                 rank_s: int = 250, rank_c: int = 150, lambda_c: float = 0.0, lambda_s: float = 0.0,
                  device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.info(f"config loraks flavor")
         # config
@@ -34,9 +35,11 @@ class Base:
         self.dim_t_ch = self.dim_echoes * self.dim_channels
         # loraks params
         self.radius: int = radius
-        self.rank: int = rank
+        self.rank_s: int = rank_s
+        self.lambda_s: float = lambda_s
+        self.rank_c: int = rank_c
+        self.lambda_c: float = lambda_c
         self.mode: str = mode
-        self.lam: float = lam
         self.max_num_iter: int = max_num_iter
         self.conv_tol: float = conv_tol
         # neighborhood dim
@@ -68,27 +71,39 @@ class Base:
         # get a dict with residuals and iteration
         self.stats: dict = {}
         # get operator
-        self.op_x: fns_ops.S | fns_ops.G | fns_ops.C = fns_ops.get_operator_from_mode(
-            mode=self.mode, k_space_dims=self.k_space_dims, radius=self.radius)
-
+        self.op_s: fns_ops.S = fns_ops.get_operator_from_mode(
+            mode="s", k_space_dims=self.k_space_dims, radius=self.radius
+        )
+        self.op_c: fns_ops.C = fns_ops.get_operator_from_mode(
+            mode="c", k_space_dims=self.k_space_dims, radius=self.radius
+        )
         # p*p is the same matrix irrespective of channel / time sampling information,
         # we can compute it for single slice, single channel, single echo data
-        self.p_star_p: torch.tensor = torch.abs(
-            self.op_x.p_star_p(k_vector=torch.ones(self.dim_s, dtype=torch.complex128))
+        self.p_star_p_c: torch.tensor = torch.abs(
+            self.op_c.p_star_p(k_vector=torch.ones(self.dim_s, dtype=torch.complex128))
+        )
+        self.p_star_p_s: torch.tensor = torch.abs(
+            self.op_s.p_star_p(k_vector=torch.ones(self.dim_s, dtype=torch.complex128))
         )
         self.visualize: bool = visualize
         self.fig_path: plib.Path = fig_path
 
         if self.visualize:
             log_module.debug(f"Plotting P*P")
-            plotting.plot_slice(
-                torch.reshape(self.p_star_p, (self.dim_read, self.dim_phase)),
-                name="p_star_p", outpath=self.fig_path,
-            )
+            if self.lambda_c > 1e-6:
+                plotting.plot_slice(
+                    torch.reshape(self.p_star_p_c, (self.dim_read, self.dim_phase)),
+                    name="p_star_p_c", outpath=self.fig_path,
+                )
+            if self.lambda_s > 1e-6:
+                plotting.plot_slice(
+                    torch.reshape(self.p_star_p_s, (self.dim_read, self.dim_phase)),
+                    name="p_star_p_s", outpath=self.fig_path,
+                )
             log_module.debug(f"Plotting fhf and fhd")
             for idx_e in range(min(self.dim_echoes, 3)):
                 plotting.plot_slice(
-                    torch.reshape(self.fhf[:,idx_e], (self.dim_read, self.dim_phase)),
+                    torch.reshape(self.fhf[:, idx_e], (self.dim_read, self.dim_phase)),
                     f"fhf_e-{idx_e+1}", outpath=self.fig_path
                 )
                 plotting.plot_slice(

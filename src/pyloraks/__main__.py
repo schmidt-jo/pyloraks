@@ -100,10 +100,6 @@ def reconstruction(
 
 
 def setup_data(opts: options.Config):
-    logging.info(f"___ Loraks Reconstruction ___")
-    logging.info(f"{opts.flavour}; Rank - {opts.rank}; Radius - {opts.radius}; "
-                 f"Lambda - {opts.lam}; mode - {opts.mode}; coil compression - {opts.coil_compression}")
-
     logging.debug("Load data")
     k_space, affine, sampling_pattern = utils.load_data(
         input_k_space=opts.input_k,
@@ -187,10 +183,23 @@ def main(opts: options.Config):
     # ToDo: Want to set all matrices used throughout different algorithms / flavors as object
     # ToDo: chose algorithm / flavor, send object and execute
 
+    # check some options
+    if opts.mode in ["s", "S"]:
+        opts.lambda_c = 0.0
+    if opts.mode in ["c", "C"]:
+        opts.lambda_s = 0.0
+
+    logging.info(f"___ Loraks Reconstruction ___")
+    logging.info(f"{opts.flavour}; Radius - {opts.radius}; Rank C - {opts.rank_c}; Lambda C - {opts.lambda_c}; "
+                 f"Rank S - {opts.rank_s}; Lambda S - {opts.lambda_s}; "
+                 f"mode - {opts.mode}; coil compression - {opts.coil_compression}")
+
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,
-        mode=opts.mode, radius=opts.radius, rank=opts.rank, lam=opts.lam,
+        mode=opts.mode, radius=opts.radius,
+        rank_c=opts.rank_c, lambda_c=opts.lambda_c,
+        rank_s=opts.rank_s, lambda_s=opts.lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
         fft_algorithm=False, device=device, fig_path=fig_path
     )
@@ -222,7 +231,12 @@ def main(opts: options.Config):
         loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
 
     logging.info(f"Save k-space reconstruction")
-    loraks_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    loraks_name = f"loraks_k_space_recon_r-{opts.radius}"
+    if opts.lambda_c > 1e-6:
+        loraks_name = f"{loraks_name}_lc-{opts.lambda_c:.3f}_rank-c-{opts.rank_c}"
+    if opts.lambda_s > 1e-6:
+        loraks_name = f"{loraks_name}_ls-{opts.lambda_s:.3f}_rank-s-{opts.rank_s}"
+    loraks_name = loraks_name.replace(".", "p")
     file_name = out_path.joinpath(loraks_name).with_suffix(".pt")
     logging.info(f"write file: {file_name}")
     torch.save(loraks_recon, file_name.as_posix())
@@ -245,9 +259,7 @@ def main(opts: options.Config):
     if opts.process_slice:
         loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
 
-    nii_name = f"loraks_k_space_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
-    utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_k, affine=affine)
-
+    utils.save_data(out_path=out_path, name=loraks_name, data=loraks_recon_k, affine=affine)
 
     logging.info("FFT into image space")
     # fft into real space
@@ -277,7 +289,7 @@ def main(opts: options.Config):
 
     loraks_recon_img = loraks_recon_mag * torch.exp(1j * loraks_phase)
 
-    nii_name = f"loraks_image_recon_r-{opts.radius}_l-{opts.lam}_rank-{opts.rank}"
+    nii_name = loraks_name.replace("k_space", "image")
     utils.save_data(out_path=out_path, name=nii_name, data=loraks_recon_img, affine=affine)
 
 
@@ -309,13 +321,13 @@ def optimize_loraks_params():
     # loraks_rank = wandb.config["rank"]
     # loraks_lambda = wandb.config["lambda"]
     loraks_radius = 3
-    loraks_rank = 150
-    loraks_lambda = 0.2
+    loraks_rank_s = 150
+    loraks_lambda_s = 0.2
 
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,
-        mode=opts.mode, radius=loraks_radius, rank=loraks_rank, lam=loraks_lambda,
+        mode=opts.mode, radius=loraks_radius, rank_s=loraks_rank_s, lambda_s=loraks_lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
         fft_algorithm=False, device=device, fig_path=fig_path, visualize=opts.visualize
     )

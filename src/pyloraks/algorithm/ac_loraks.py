@@ -10,23 +10,29 @@ log_module = logging.getLogger(__name__)
 
 
 class ACLoraks(Base):
+
     def __init__(
             self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
-            mode: str, radius: int, rank: int, lam: float, max_num_iter: int, conv_tol: float,
+            max_num_iter: int, conv_tol: float,
+            mode: str, radius: int, rank_c: int = 150, lambda_c: float = 0.0, rank_s: int = 250, lambda_s: float = 0.0,
             fft_algorithm: bool = False,
             device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.debug(f"Setup Base class")
         # initialize base constants
         super().__init__(
             k_space_input=k_space_input, mask_indices_input=mask_indices_input,
-            mode=mode, radius=radius, rank=rank, lam=lam, max_num_iter=max_num_iter, conv_tol=conv_tol,
+            mode=mode, radius=radius, rank_c=rank_c, lambda_c=lambda_c,
+            rank_s=rank_s, lambda_s=lambda_s,
+            max_num_iter=max_num_iter, conv_tol=conv_tol,
             device=device, fig_path=fig_path, visualize=visualize
         )
         log_module.debug(f"Setup AC LORAKS specifics")
         self.fft_algorithm: bool = fft_algorithm
         # compute aha - stretch along channels
         fhf = self.fhf[:, None, :].expand((-1, self.dim_channels, -1))
-        self.aha = torch.flatten(fhf + self.lam * self.p_star_p[:, None, None]).to(self.device)
+        self.aha = torch.flatten(
+            fhf + self.lambda_c * self.p_star_p_c[:, None, None] + self.lambda_s * self.p_star_p_s[:, None, None]
+        ).to(self.device)
         # recon takes place per slice for combined echo and channel dimensions.
         # we can thus find the AC region and save it to not redo the computation each slice
         # we save the indices of mapped vectors to op matrix after finding which neighborhoods are
@@ -39,7 +45,7 @@ class ACLoraks(Base):
         # momentarily the implementation is aiming at joint echo recon. we use all echoes,
         # but might need to batch the channel dimensions. in the nullspace approx we use all data
         # get indices for centered origin k-space
-        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_x.point_sym_nb_coos
+        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_s.point_sym_nb_coos
         # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
         a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
         b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
@@ -51,46 +57,50 @@ class ACLoraks(Base):
         # plot extracted region if flag set
         if self.visualize:
             # plot the found acs for reference
-            dim = self.dim_nb * self.dim_t_ch
-            if self.mode in ["s", "S"]:
-                dim *= 2
-            acs = torch.zeros((idxs_ac.shape[0], dim))
+            acs = torch.zeros((idxs_ac.shape[0], self.dim_nb * self.dim_t_ch * 2))
             acs[idxs_ac] = 1
-            acs = self.op_x.operator_adjoint(acs)
+            acs = self.op_s.operator_adjoint(acs)
             acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
             plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
         # return the found indices
         return idxs_ac
 
-    def get_acs_v(self, idx_slice: int):
+    def get_acs_v(self, idx_slice: int, mode: str):
         """
-        Compute the V matrix for solving the AC LORAKS formulation from autocalibration data.
-        We need to find the ACS data first and then evaluate the nullspace subspace.
-        """
-        if self.mode in ["c", "C"]:
+                Compute the V matrix for solving the AC LORAKS formulation from autocalibration data.
+                We need to find the ACS data first and then evaluate the nullspace subspace.
+                """
+        # we use data from current slice
+        k_space_slice = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
+        if mode in ["c", "C"]:
             # want submatrix of respecitve loraks matrix with fully populated rows
-            c_idx = self.op_x.operator(k_space=self.fhf)
-            idxs = torch.nonzero(torch.sum(c_idx, dim=1) == c_idx.shape[1])
-            # build X matrix from k-space
-            m_ac = self.op_x.operator(k_space=self.k_space_input[idx_slice])[idxs]
-        elif self.mode in ["s", "S"]:
+            # the indices for the fully populated rows are extracted to also be used for S matrix formulation,
+            # which has twice as many rows. we only need the first half
+            idxs_ac = self.idxs_ac[:int(self.idxs_ac.shape[0] / 2)]
+            # build X matrix from k-space current slice
+            c_matrix = self.op_c.operator(k_space=k_space_slice)
+            # take only fully populated rows
+            m_ac = c_matrix[idxs_ac]
+            # we want to use the rank of the c mode
+            rank = self.rank_c
+        elif mode in ["s", "S"]:
             # now we build the s_matrix with the 0 filled data for the current slice
-            s_mac_k_in = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
-            s_matrix = self.op_x.operator(k_space=s_mac_k_in)
+            s_matrix = self.op_s.operator(k_space=k_space_slice)
             # and keep only the fully populated rows - we calculated which those are already for all
             # echo sampling patterns
             m_ac = s_matrix[self.idxs_ac]
+            # we want to use the rank parameter of the s mode
+            rank = self.rank_s
         else:
-            err = f"ACS calibration not implemented (yet) for mode {self.mode}. Choose either c or s"
+            err = f"ACS calibration not implemented (yet) for mode {mode}. Choose either c or s"
             log_module.error(err)
             raise ValueError(err)
-        if m_ac.shape[0] < self.rank:
+        if m_ac.shape[0] < rank:
             err = f"detected AC region is too small for chosen rank"
             log_module.error(err)
             raise ValueError(err)
         if torch.cuda.is_available():
             m_ac = m_ac.to(torch.device("cuda:0"))
-
         # via eigh
         eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
         m_ac_rank = eig_vals.shape[0]
@@ -99,33 +109,49 @@ class ACLoraks(Base):
         # eig_vecs_r = eig_vecs[idxs]
         eig_vecs = eig_vecs[:, idxs]
         # v_sub_r = eig_vecs_r[:self.rank].to(self.device)
-        v_sub = eig_vecs[:, :self.rank].to(self.device)
+        v_sub = eig_vecs[:, :rank].to(self.device)
 
-        if m_ac_rank < self.rank:
+        if m_ac_rank < rank:
             err = f"loraks rank parameter is too large, cant be bigger than ac matrix dimensions."
             log_module.error(err)
             raise ValueError(err)
 
         if idx_slice == 0 and self.visualize:
-            plotting.plot_slice(v_sub, name="v_sub", outpath=self.fig_path)
+            plotting.plot_slice(v_sub, name=f"v_sub_{mode}", outpath=self.fig_path)
 
         return v_sub
 
-    def _get_m_1_diag_vector(self, f: torch.tensor, v: torch.tensor) -> torch.tensor:
+    def _get_m_1_diag_vector(
+            self, f: torch.tensor,
+            v_s: torch.tensor = torch.zeros(1), v_c: torch.tensor = torch.zeros(1)) -> torch.tensor:
         """
         We define the M_1 matrix from A^H A f and the loraks operator P_x(f) V V^H,
         after extracting V from ACS data and getting the P_x based on the Loraks mode used.
         """
         m1_fhf = self.aha * f
-        m1_v = torch.flatten(
-            self.op_x.operator_adjoint(
-                torch.matmul(
-                    self.op_x.operator(torch.reshape(f, (self.dim_s, -1))),
-                    v
+        if self.lambda_c > 1e-6:
+            m1_v_c = torch.flatten(
+                self.op_c.operator_adjoint(
+                    torch.matmul(
+                        self.op_c.operator(torch.reshape(f, (self.dim_s, -1))),
+                        v_c
+                    )
                 )
             )
-        )
-        return m1_fhf - self.lam * m1_v
+        else:
+            m1_v_c = 0.0
+        if self.lambda_s > 1e-6:
+            m1_v_s = torch.flatten(
+                self.op_s.operator_adjoint(
+                    torch.matmul(
+                        self.op_s.operator(torch.reshape(f, (self.dim_s, -1))),
+                        v_s
+                    )
+                )
+            )
+        else:
+            m1_v_s = 0.0
+        return m1_fhf - self.lambda_s * m1_v_s - self.lambda_c * m1_v_c
 
     def _solve_fft(self):
         """
@@ -140,7 +166,7 @@ class ACLoraks(Base):
         """
         pass
 
-    def _cgd(self, b, v):
+    def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros(1), v_c: torch.tensor = torch.zeros(1)):
         n2b = torch.linalg.norm(b)
 
         x = torch.zeros_like(b)
@@ -149,7 +175,7 @@ class ACLoraks(Base):
         iimin = 0
         tolb = self.conv_tol * n2b
 
-        r = b - self._get_m_1_diag_vector(x, v)
+        r = b - self._get_m_1_diag_vector(f=x, v_s=v_s, v_c=v_c)
 
         normr = torch.linalg.norm(r)
         normr_act = normr
@@ -171,7 +197,7 @@ class ACLoraks(Base):
             else:
                 beta = rho / rho1
                 p = z + beta * p
-            q = self._get_m_1_diag_vector(p, v)
+            q = self._get_m_1_diag_vector(f=x, v_s=v_s, v_c=v_c)
             pq = torch.sum(p.conj() * q)
             alpha = rho / pq
 
@@ -183,7 +209,7 @@ class ACLoraks(Base):
             res_vec[ii] = normr
 
             if normr <= tolb:
-                r = b - self._get_m_1_diag_vector(x, v)
+                r = b - self._get_m_1_diag_vector(f=x, v_s=v_s, v_c=v_c)
                 normr_act = torch.linalg.norm(r)
                 res_vec[ii] = normr_act
                 log_module.info(f"reached convergence at step {ii + 1}")
@@ -207,16 +233,24 @@ class ACLoraks(Base):
         # low rank constraints of the LORAKS matrices
         for idx_slice in range(self.dim_slice):
             log_module.info(f"Reconstruction::Processing::Slice {1 + idx_slice} / {self.dim_slice}")
-            log_module.debug("estimate nullspace")
-            v_sub = self.get_acs_v(idx_slice=idx_slice)
+            log_module.debug("estimate nullspace - C")
+            if self.lambda_c > 1e-6:
+                v_sub_c = self.get_acs_v(idx_slice=idx_slice, mode="c")
+            else:
+                v_sub_c = torch.zeros(1)
+            if self.lambda_s > 1e-6:
+                v_sub_s = self.get_acs_v(idx_slice=idx_slice, mode="s")
+            else:
+                v_sub_s = torch.zeros(1)
 
-            vvh = torch.matmul(v_sub, v_sub.conj().T)
+            vvs = torch.matmul(v_sub_s, v_sub_s.conj().T)
+            vvc = torch.matmul(v_sub_c, v_sub_c.conj().T)
 
             log_module.debug("start pcg solve")
 
             in_fhd = torch.flatten(self.fhd[idx_slice]).to(self.device)
 
-            f_slice, residual_abs_sum, stats = self._cgd(in_fhd, vvh)
+            f_slice, residual_abs_sum, stats = self._cgd(b=in_fhd, v_s=vvs, v_c=vvc)
             self.k_iter_current[idx_slice] = torch.reshape(
                 f_slice,
                 (-1, self.dim_channels, self.dim_echoes)

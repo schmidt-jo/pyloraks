@@ -70,11 +70,13 @@ class Config(sp.Serializable):
         help=f"LORAKS flavour. Implementation of different LORAKS variations."
     )
 
-    rank: int = sp.field(alias="-rr", default=100)
     radius: int = sp.field(alias="-r", default=3)
-    lam: float = sp.field(alias="-l", default=0.1)
+    rank_c: int = sp.field(alias="-rr", default=150)
+    lambda_c: float = sp.field(alias="-l", default=0.1)
+    rank_s: int = sp.field(alias="-rr", default=250)
+    lambda_s: float = sp.field(alias="-l", default=0.1)
 
-    lambda_data: float = sp.field(alias="-dl", default=0.5)
+    # lambda_data: float = sp.field(alias="-dl", default=0.5)
     conv_tol: float = sp.field(alias="-ct", default=1e-3)
     max_num_iter: int = sp.field(alias="-mni", default=10)
 
