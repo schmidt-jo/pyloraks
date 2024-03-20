@@ -11,13 +11,11 @@ def reconstruction(
         config_file: str, output_path: str, input_k: str,
         input_extra: str = None, input_sampling_mask: str = None,
         coil_compression: int = 8, read_dir: int = 0,
-        aspire_echo_indexes: tuple = (0, 1),
         debug: bool = False, process_slice: bool = False,
-        visualize: bool = True, mode: str = "s",
-        flavour: str = "AC-LORAKS",
-        rank: int = 100, radius: int = 3, lam: float = 0.1,
-        lambda_data: float = 0.5, conv_tol: float = 1e-3, max_num_iter: int = 10,
-        batch_size: int = 4, wandb: bool = False):
+        visualize: bool = True, flavour: str = "AC-LORAKS",
+        radius: int = 3, conv_tol: float = 1e-3, max_num_iter: int = 10,
+        lambda_s: float = 0.1, rank_s: int = 250, lambda_c: float = 0.1, rank_c: int = 150,
+        batch_size: int = 4, use_wandb: bool = False):
     """
     :param config_file: str
     Provide configuration file in which all relevant options are given.
@@ -46,10 +44,6 @@ def reconstruction(
     :param read_dir: int (default=0)
     specify read direction if not in x. Necessary for AC LORAKS to deduce AC region.
 
-    :param aspire_echo_indexes: tuple (default=(0, 1))
-    Input echo indexes to use for phase coil combination with aspire (m=1).
-    Usually the indices of first two SE data in the echo train
-
     :param debug: bool (default=False)
     If set provides additional debugging information. Reduces input data for quicker processing.
 
@@ -59,31 +53,34 @@ def reconstruction(
     :param visualize: bool (default=True)
     If set enables visualization & plots of intermediate data.
 
-    :param mode: str (choices=["s", "S", "c", "C", "g", "G"], default="s")
-    LORAKS mode.
-
     :param flavour: str (default="AC-LORAKS")
     LORAKS flavour. Implementation of different LORAKS variations
 
-    :param rank: int (default=100)
-    LORAKS rank.
+    :param rank_c: int (default=150)
+    LORAKS rank for C Matrix. Applicable only if lambda_c > 0.
 
-    :params radius: int (default=3)
+    :param lambda_c: float (default=0.1)
+    LORAKS regularization parameter for C Matrix rank regularization.
+
+    :param rank_s: int (default=250)
+    LORAKS rank for S Matrix. Applicable only if lambda_s > 0.
+
+    :param lambda_s: float (default=0.1)
+    LORAKS regularization parameter for S Matrix rank regularization.
+
+    :param radius: int (default=3)
     LORAKS neighborhood radius to construct sparse matrix.
 
-    :params lam: float (default=0.1)
-    LORAKS lambda.
-
-    :params lambda_data: float (default=0.5)
-    LORAKS lambda for data consistency term.
-
-    :params conv_tol: float (default=1e-3)
+    :param conv_tol: float (default=1e-3)
     LORAKS convergence tolerance.
-
-    :params batch_size: int (default=4)
+    
+    :param max_num_iter: int (default=10)
+    Maximum number of CGD iterations to solve minimization.
+    
+    :param batch_size: int (default=4)
     Batch-size for batched implementation if echoes*coils to big for memory. Not yet Implemented!
 
-    :params wandb: bool (default=False)
+    :param use_wandb: bool (default=False)
     Wandb logging.
     """
 
@@ -92,9 +89,9 @@ def reconstruction(
         input_k=input_k, input_extra=input_extra, input_sampling_mask=input_sampling_mask,
         coil_compression=coil_compression, read_dir=read_dir,  # aspire_echo_indexes=aspire_echo_indexes,
         debug=debug, process_slice=process_slice, visualize=visualize,
-        mode=mode, flavour=flavour,
-        rank=rank, radius=radius, lam=lam, lambda_data=lambda_data, conv_tol=conv_tol, max_num_iter=max_num_iter,
-        batch_size=batch_size, wandb=wandb
+        flavour=flavour, conv_tol=conv_tol, max_num_iter=max_num_iter, radius=radius,
+        rank_c=rank_c, lambda_c=lambda_c, rank_s=rank_s, lambda_s=lambda_s,
+        batch_size=batch_size, use_wandb=use_wandb
     )
     main(opts)
 
@@ -125,18 +122,6 @@ def setup_data(opts: options.Config):
     if sampling_pattern.shape.__len__() < 3:
         # sampling pattern supposed to be x, y, t
         sampling_pattern = sampling_pattern[:, :, None]
-    logging.debug(f"Visualize if toggle set")
-    # if opts.visualize:
-    #     logging.debug(f"look at fs data")
-    #     sli, ch, t = (torch.tensor([*k_space.shape[2:]]) / 2).to(torch.int)
-    #     plot_k = k_space[:, :, sli, ch, 0]
-    #     plotting.plot_img(img_tensor=plot_k.clone().detach().cpu(), log_mag=True,
-    #                       out_path=fig_path, name=f"fs_k_space")
-    #     fs_img_recon = torch.fft.ifftshift(torch.fft.ifft2(torch.fft.fftshift(plot_k)))
-    #     plotting.plot_img(img_tensor=fs_img_recon.clone().detach().cpu(),
-    #                       out_path=fig_path, name="fs_recon")
-    #     if opts.debug:
-    #         plotting.plot_img(sampling_pattern[:, :, 0].to(torch.int), out_path=fig_path, name="sampling_pattern")
 
     if opts.coil_compression is not None:
         k_space = utils.compress_channels(
@@ -183,21 +168,15 @@ def main(opts: options.Config):
     # ToDo: Want to set all matrices used throughout different algorithms / flavors as object
     # ToDo: chose algorithm / flavor, send object and execute
 
-    # check some options
-    if opts.mode in ["s", "S"]:
-        opts.lambda_c = 0.0
-    if opts.mode in ["c", "C"]:
-        opts.lambda_s = 0.0
-
     logging.info(f"___ Loraks Reconstruction ___")
     logging.info(f"{opts.flavour}; Radius - {opts.radius}; Rank C - {opts.rank_c}; Lambda C - {opts.lambda_c}; "
                  f"Rank S - {opts.rank_s}; Lambda S - {opts.lambda_s}; "
-                 f"mode - {opts.mode}; coil compression - {opts.coil_compression}")
+                 f"coil compression - {opts.coil_compression}")
 
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,
-        mode=opts.mode, radius=opts.radius,
+        radius=opts.radius,
         rank_c=opts.rank_c, lambda_c=opts.lambda_c,
         rank_s=opts.rank_s, lambda_s=opts.lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
@@ -294,7 +273,7 @@ def main(opts: options.Config):
 
 
 def optimize_loraks_params():
-    # wandb.init()
+    wandb.init()
     # load opts
     opts = options.Config.load(
         "/data/pt_np-jschmidt/data/00_phantom_scan_data/pulseq_2024-03-07_megesse-mese-acc-test/"
@@ -317,17 +296,22 @@ def optimize_loraks_params():
     k_space, f_indexes, _ = setup_data(opts=opts)
 
     # get loraks params from wandb
-    # loraks_radius = wandb.config["radius"]
-    # loraks_rank = wandb.config["rank"]
-    # loraks_lambda = wandb.config["lambda"]
-    loraks_radius = 3
-    loraks_rank_s = 150
-    loraks_lambda_s = 0.2
+    loraks_radius = wandb.config["radius"]
+    loraks_rank_c = wandb.config["rank_c"]
+    loraks_lambda_c = wandb.config["lambda_c"]
+    loraks_rank_s = wandb.config["rank_s"]
+    loraks_lambda_s = wandb.config["lambda_s"]
+    # loraks_radius = 3
+    # loraks_rank_c = 100
+    # loraks_lambda_c = 0.2
+    # loraks_rank_s = 200
+    # loraks_lambda_s = 0.2
 
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,
-        mode=opts.mode, radius=loraks_radius, rank_s=loraks_rank_s, lambda_s=loraks_lambda_s,
+        radius=loraks_radius, rank_c=loraks_rank_c, lambda_c=loraks_lambda_c,
+        rank_s=loraks_rank_s, lambda_s=loraks_lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
         fft_algorithm=False, device=device, fig_path=fig_path, visualize=opts.visualize
     )
@@ -336,7 +320,7 @@ def optimize_loraks_params():
     # get stats and min residual norm
     residual_vector, stats = solver.get_residuals()
     logging.info(f"Finished Run. Min l2 residual norm: {stats['norm_res_min']:3f}")
-    # wandb.log({"res_min": stats["norm_res_min"]})
+    wandb.log({"res_min": stats["norm_res_min"]})
 
 
 if __name__ == '__main__':
@@ -358,7 +342,7 @@ if __name__ == '__main__':
     logging.info(f"___ PyLORAKS reconstruction ___")
     logging.info(f"_______________________________")
     try:
-        if config.wandb:
+        if config.use_wandb:
             # setup wandb
             wandb.init()
             optimize_loraks_params()

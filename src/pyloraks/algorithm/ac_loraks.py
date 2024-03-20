@@ -14,14 +14,14 @@ class ACLoraks(Base):
     def __init__(
             self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
             max_num_iter: int, conv_tol: float,
-            mode: str, radius: int, rank_c: int = 150, lambda_c: float = 0.0, rank_s: int = 250, lambda_s: float = 0.0,
+            radius: int, rank_c: int = 150, lambda_c: float = 0.0, rank_s: int = 250, lambda_s: float = 0.0,
             fft_algorithm: bool = False,
             device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.debug(f"Setup Base class")
         # initialize base constants
         super().__init__(
             k_space_input=k_space_input, mask_indices_input=mask_indices_input,
-            mode=mode, radius=radius, rank_c=rank_c, lambda_c=lambda_c,
+            radius=radius, rank_c=rank_c, lambda_c=lambda_c,
             rank_s=rank_s, lambda_s=lambda_s,
             max_num_iter=max_num_iter, conv_tol=conv_tol,
             device=device, fig_path=fig_path, visualize=visualize
@@ -37,31 +37,48 @@ class ACLoraks(Base):
         # we can thus find the AC region and save it to not redo the computation each slice
         # we save the indices of mapped vectors to op matrix after finding which neighborhoods are
         # completely mapped into the operator matrix
-        self.idxs_ac: torch.tensor = self._find_ac_indices()
+        self.idxs_ac_s: torch.tensor = self._find_ac_indices(mode="s")
+        self.idxs_ac_c: torch.tensor = self._find_ac_indices(mode="c")
 
-    def _find_ac_indices(self):
+    def _find_ac_indices(self, mode: str = "s"):
         # we can use the sampling mask, rebuild it in 2d, sampling pattern equal per coil but different per echo
         mask = torch.reshape(self.fhf, (self.dim_read, self.dim_phase, self.dim_echoes))
         # momentarily the implementation is aiming at joint echo recon. we use all echoes,
         # but might need to batch the channel dimensions. in the nullspace approx we use all data
+
         # get indices for centered origin k-space
-        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_s.point_sym_nb_coos
-        # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
-        a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
-        b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
-        # lets look for the ACS which is constant across the joint dimension and the neighborhood
-        # we check the mask for it, irrespective of the combined dimension, its usually sampled different
-        # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
-        c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
-        idxs_ac = torch.tile((c == a.shape[1] * a.shape[2] * 2), dims=(2,))
+        if mode in ["s", "S"]:
+            p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.op_s.nb_coos_point_symmetric
+            # we want to find indices for which the whole neighborhood of point symmetric coordinates is contained
+            a = mask[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
+            b = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
+            # lets look for the ACS which is constant across the joint dimension and the neighborhood
+            # we check the mask for it, irrespective of the combined dimension, its usually sampled different
+            # for different echoes, but equally for the different channels. We can deduce the dimensions from the mask.
+            c = torch.sum(a, dim=(1, 2)) + torch.sum(b, dim=(1, 2))
+            idxs_ac = torch.tile((c == a.shape[1] * a.shape[2] * 2), dims=(2,))
+            op_x = self.op_s
+            df = 2
+        elif mode in ["c", "C"]:
+            p_nb_nx_ny_idxs = self.op_c.get_lin_neighborhoods()
+            # we want to find indices for which the whole neighborhood of coordinates is contained
+            a = mask[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
+            c = torch.sum(a, dim=(1, 2))
+            idxs_ac = (c == a.shape[1] * a.shape[2])
+            op_x = self.op_c
+            df = 1
+        else:
+            err = f"mode {mode} not implemented for AC region search."
+            log_module.error(err)
+            raise ValueError(err)
         # plot extracted region if flag set
         if self.visualize:
             # plot the found acs for reference
-            acs = torch.zeros((idxs_ac.shape[0], self.dim_nb * self.dim_t_ch * 2))
+            acs = torch.zeros((idxs_ac.shape[0], self.dim_nb * self.dim_t_ch * df))
             acs[idxs_ac] = 1
-            acs = self.op_s.operator_adjoint(acs)
+            acs = op_x.operator_adjoint(acs)
             acs = torch.reshape(acs, (self.dim_read, self.dim_phase, -1))
-            plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region", self.fig_path)
+            plotting.plot_slice(acs[:, :, 0], f"extracted_AC_region_{mode}", self.fig_path)
         # return the found indices
         return idxs_ac
 
@@ -74,13 +91,10 @@ class ACLoraks(Base):
         k_space_slice = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
         if mode in ["c", "C"]:
             # want submatrix of respecitve loraks matrix with fully populated rows
-            # the indices for the fully populated rows are extracted to also be used for S matrix formulation,
-            # which has twice as many rows. we only need the first half
-            idxs_ac = self.idxs_ac[:int(self.idxs_ac.shape[0] / 2)]
             # build X matrix from k-space current slice
             c_matrix = self.op_c.operator(k_space=k_space_slice)
             # take only fully populated rows
-            m_ac = c_matrix[idxs_ac]
+            m_ac = c_matrix[self.idxs_ac_c]
             # we want to use the rank of the c mode
             rank = self.rank_c
         elif mode in ["s", "S"]:
@@ -88,7 +102,7 @@ class ACLoraks(Base):
             s_matrix = self.op_s.operator(k_space=k_space_slice)
             # and keep only the fully populated rows - we calculated which those are already for all
             # echo sampling patterns
-            m_ac = s_matrix[self.idxs_ac]
+            m_ac = s_matrix[self.idxs_ac_s]
             # we want to use the rank parameter of the s mode
             rank = self.rank_s
         else:
@@ -99,8 +113,8 @@ class ACLoraks(Base):
             err = f"detected AC region is too small for chosen rank"
             log_module.error(err)
             raise ValueError(err)
-        if torch.cuda.is_available():
-            m_ac = m_ac.to(torch.device("cuda:0"))
+        # put on device if not there already
+        m_ac = m_ac.to(self.device)
         # via eigh
         eig_vals, eig_vecs = torch.linalg.eigh(torch.matmul(m_ac.T, m_ac))
         m_ac_rank = eig_vals.shape[0]
@@ -123,7 +137,7 @@ class ACLoraks(Base):
 
     def _get_m_1_diag_vector(
             self, f: torch.tensor,
-            v_s: torch.tensor = torch.zeros(1), v_c: torch.tensor = torch.zeros(1)) -> torch.tensor:
+            v_s: torch.tensor = torch.zeros((1, 1)), v_c: torch.tensor = torch.zeros((1, 1))) -> torch.tensor:
         """
         We define the M_1 matrix from A^H A f and the loraks operator P_x(f) V V^H,
         after extracting V from ACS data and getting the P_x based on the Loraks mode used.
@@ -166,10 +180,10 @@ class ACLoraks(Base):
         """
         pass
 
-    def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros(1), v_c: torch.tensor = torch.zeros(1)):
+    def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros((1, 1)), v_c: torch.tensor = torch.zeros((1, 1))):
         n2b = torch.linalg.norm(b)
 
-        x = torch.zeros_like(b)
+        x = torch.rand_like(b)
         p = 1
         xmin = x
         iimin = 0
@@ -237,11 +251,11 @@ class ACLoraks(Base):
             if self.lambda_c > 1e-6:
                 v_sub_c = self.get_acs_v(idx_slice=idx_slice, mode="c")
             else:
-                v_sub_c = torch.zeros(1)
+                v_sub_c = torch.zeros((1, 1))
             if self.lambda_s > 1e-6:
                 v_sub_s = self.get_acs_v(idx_slice=idx_slice, mode="s")
             else:
-                v_sub_s = torch.zeros(1)
+                v_sub_s = torch.zeros((1, 1))
 
             vvs = torch.matmul(v_sub_s, v_sub_s.conj().T)
             vvc = torch.matmul(v_sub_c, v_sub_c.conj().T)

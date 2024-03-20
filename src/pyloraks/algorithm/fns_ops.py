@@ -52,7 +52,8 @@ class LoraksOperator:
             k_space_dims[0] * k_space_dims[1],  # xy
             k_space_dims[2] * k_space_dims[3]  # t-ch
         )
-        self.point_sym_nb_coos = self.get_point_symmetric_neighborhoods()
+        self.nb_coos_point_symmetric = self.get_point_symmetric_neighborhoods()
+        self.nb_coos_linear = self.get_lin_neighborhoods()
 
     def operator(self, k_space: torch.tensor) -> torch.tensor:
         """ k-space input in 2d, [xy, ch_t(possibly batched)]"""
@@ -127,7 +128,16 @@ class LoraksOperator:
         p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
         # build inverted indexes - point symmetric origin in center
         m_nb_nx_ny_idxs = m_nx_ny_idxs[:, None] + kn_pts[None, :]
-        return p_nb_nx_ny_idxs, m_nb_nx_ny_idxs
+        return p_nb_nx_ny_idxs.to(torch.int), m_nb_nx_ny_idxs.to(torch.int)
+
+    def get_lin_neighborhoods(self):
+        # get neighborhood points
+        kn_pts = get_k_radius_grid_points(radius=self.radius)
+        # build neighborhoods
+        # get k-space-indexes
+        p_nx_ny_idxs = self._get_k_space_pt_idxs(include_offset=False, point_symmetric_mirror=False)
+        p_nb_nx_ny_idxs = p_nx_ny_idxs[:, None] + kn_pts[None, :]
+        return p_nb_nx_ny_idxs.to(torch.int)
 
 
 class C(LoraksOperator):
@@ -140,14 +150,10 @@ class C(LoraksOperator):
         :param k_space: flattened k_space vector
         :return: C matrix, dims [(kx - 2R)*(ky - 2R)
         """
-        # get k-space indexes
-        k_pts = self._get_k_space_pt_idxs()
-        # get neighborhood pts
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
         # put k_space back into 2D slice and 3rd dim is concatenated t-ch
         k_space = torch.reshape(k_space, (self.k_space_dims[0], self.k_space_dims[1], -1))
-        # build indices
-        p_nb_nx_ny = (k_pts[:, None] + kn_pts[None, :]).to(torch.int)
+        # get indices for whole k-space
+        p_nb_nx_ny = self.nb_coos_linear
         # extract from matrix
         c_matrix = k_space[p_nb_nx_ny[:, :, 0], p_nb_nx_ny[:, :, 1]]
         # now we want the neighborhoods of individual t-ch info to be concatenated into the neighborhood axes.
@@ -160,12 +166,8 @@ class C(LoraksOperator):
         :param x_matrix:
         :return: flattened k-space vector
         """
-        # get k-space indexes
-        k_pts = self._get_k_space_pt_idxs()
-        # get neighborhood pts
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
         # build indices
-        p_nb_nx_ny_idxs = (k_pts[:, None] + kn_pts[None, :]).to(torch.int)
+        p_nb_nx_ny_idxs = self.get_lin_neighborhoods()
         if x_matrix.shape[0] < x_matrix.shape[1]:
             # want neighborhood dim to be in column
             x_matrix = x_matrix.T
@@ -195,22 +197,11 @@ class S(LoraksOperator):
 
     def _operator(self, k_space: torch.tensor) -> torch.tensor:
         # build neighborhoods
-        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.point_sym_nb_coos
-        # get dimensions
-        # xy = k_space.shape[0]
-        # nb = kn_pts.shape[0]
-        # tch = k_space.shape[-1]
-        # nb_tch = nb * tch  # added channel and time dimensions
+        p_nb_nx_ny_idxs , m_nb_nx_ny_idxs = self.nb_coos_point_symmetric
         # need to separate xy dims
         k_space = torch.reshape(k_space, (self.k_space_dims[0], self.k_space_dims[1], -1))
         # build S matrix
-        # s_p = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.complex128, device=k_space.device)
-        # s_m = torch.zeros((p_nb_nx_ny_idxs.shape[0], nb_tch), dtype=torch.complex128, device=k_space.device)
         log_module.debug(f"build s matrix")
-        # ts = torch.arange(tch) * nb
-        # for idx_nb in range(nb):
-        #     s_p[:, ts + idx_nb] = k_space[p_nb_nx_ny_idxs[:, idx_nb, 0], p_nb_nx_ny_idxs[:, idx_nb, 1]]
-        #     s_m[:, ts + idx_nb] = k_space[m_nb_nx_ny_idxs[:, idx_nb, 0], m_nb_nx_ny_idxs[:, idx_nb, 1]]
         # we build the matrices per channel / time image
         s_p = k_space[p_nb_nx_ny_idxs[:, :, 0], p_nb_nx_ny_idxs[:, :, 1]]
         s_m = k_space[m_nb_nx_ny_idxs[:, :, 0], m_nb_nx_ny_idxs[:, :, 1]]
@@ -225,10 +216,8 @@ class S(LoraksOperator):
         return s_matrix
 
     def _adjoint(self, x_matrix: torch.tensor) -> torch.tensor:
-        # get neighborhood points
-        kn_pts = get_k_radius_grid_points(radius=self.radius)
         # build neighborhood
-        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.point_sym_nb_coos
+        p_nb_nx_ny_idxs, m_nb_nx_ny_idxs = self.nb_coos_point_symmetric
         # store shapes
         sm, sk = x_matrix.shape
         # get dims

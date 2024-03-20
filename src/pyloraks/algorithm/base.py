@@ -15,7 +15,7 @@ log_module = logging.getLogger(__name__)
 
 class Base:
     def __init__(self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
-                 mode: str, radius: int, max_num_iter: int, conv_tol: float,
+                 radius: int, max_num_iter: int, conv_tol: float,
                  rank_s: int = 250, rank_c: int = 150, lambda_c: float = 0.0, lambda_s: float = 0.0,
                  device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.info(f"config loraks flavor")
@@ -39,7 +39,6 @@ class Base:
         self.lambda_s: float = lambda_s
         self.rank_c: int = rank_c
         self.lambda_c: float = lambda_c
-        self.mode: str = mode
         self.max_num_iter: int = max_num_iter
         self.conv_tol: float = conv_tol
         # neighborhood dim

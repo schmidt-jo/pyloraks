@@ -60,21 +60,24 @@ class Config(sp.Serializable):
         alias="-v", default=True,
         help="If set enables visualization & plots of intermediate data."
     )
-
-    mode: str = sp.field(
-        choices=["s", "S", "c", "C", "g", "G", "combined"], alias="-m", default="s",
-        help=f"LORAKS mode."
-    )
     flavour: str = sp.field(
         choices=["AC-LORAKS", "LORAKS"], alias="-f", default="AC-LORAKS",
         help=f"LORAKS flavour. Implementation of different LORAKS variations."
     )
 
     radius: int = sp.field(alias="-r", default=3)
-    rank_c: int = sp.field(alias="-rr", default=150)
-    lambda_c: float = sp.field(alias="-l", default=0.1)
-    rank_s: int = sp.field(alias="-rr", default=250)
-    lambda_s: float = sp.field(alias="-l", default=0.1)
+    rank_c: int = sp.field(alias="-rrc", default=150)
+    lambda_c: float = sp.field(
+        alias="-lc", default=0.1,
+        help=f"regularization parameter for Loraks C matrix "
+             f"rank minimization. Set 0.0 to disable C regularization."
+    )
+    rank_s: int = sp.field(alias="-rrs", default=250)
+    lambda_s: float = sp.field(
+        alias="-ls", default=0.1,
+        help=f"regularization parameter for Loraks S matrix "
+             f"rank minimization. Set 0.0 to disable S regularization."
+    )
 
     # lambda_data: float = sp.field(alias="-dl", default=0.5)
     conv_tol: float = sp.field(alias="-ct", default=1e-3)
@@ -83,7 +86,7 @@ class Config(sp.Serializable):
     batch_size: int = sp.field(alias="-b", default=4)
     use_gpu: bool = sp.field(alias="-gpu", default=False)
     gpu_device: int = sp.field(alias="-gpud", default=0)
-    wandb: bool = sp.field(alias="-wb", default=False)
+    use_wandb: bool = sp.field(alias="-wb", default=False)
 
     @classmethod
     def from_cli(cls, args: sp.ArgumentParser.parse_args):
