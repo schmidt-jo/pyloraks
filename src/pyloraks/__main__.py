@@ -173,6 +173,13 @@ def main(opts: options.Config):
                  f"Rank S - {opts.rank_s}; Lambda S - {opts.lambda_s}; "
                  f"coil compression - {opts.coil_compression}")
 
+    loraks_name = f"loraks_k_space_recon_r-{opts.radius}"
+    if opts.lambda_c > 1e-6:
+        loraks_name = f"{loraks_name}_lc-{opts.lambda_c:.3f}_rank-c-{opts.rank_c}"
+    if opts.lambda_s > 1e-6:
+        loraks_name = f"{loraks_name}_ls-{opts.lambda_s:.3f}_rank-s-{opts.rank_s}"
+    loraks_name = loraks_name.replace(".", "p")
+
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,
@@ -194,7 +201,7 @@ def main(opts: options.Config):
         fig.add_trace(
             go.Scattergl(y=residuals[idx_slice], name=f"slice: {idx_slice}")
         )
-    fig_name = out_path.joinpath(f"residuals.html")
+    fig_name = solver.fig_path.joinpath(f"{loraks_name}_residuals.html")
     logging.info(f"write file: {fig_name}")
     fig.write_html(fig_name.as_posix())
 
@@ -210,12 +217,6 @@ def main(opts: options.Config):
         loraks_recon = torch.squeeze(loraks_recon)[:, :, None, :]
 
     logging.info(f"Save k-space reconstruction")
-    loraks_name = f"loraks_k_space_recon_r-{opts.radius}"
-    if opts.lambda_c > 1e-6:
-        loraks_name = f"{loraks_name}_lc-{opts.lambda_c:.3f}_rank-c-{opts.rank_c}"
-    if opts.lambda_s > 1e-6:
-        loraks_name = f"{loraks_name}_ls-{opts.lambda_s:.3f}_rank-s-{opts.rank_s}"
-    loraks_name = loraks_name.replace(".", "p")
     file_name = out_path.joinpath(loraks_name).with_suffix(".pt")
     logging.info(f"write file: {file_name}")
     torch.save(loraks_recon, file_name.as_posix())
@@ -306,7 +307,10 @@ def optimize_loraks_params():
     # loraks_lambda_c = 0.2
     # loraks_rank_s = 200
     # loraks_lambda_s = 0.2
-
+    logging.info(f"___ Loraks Reconstruction ___")
+    logging.info(f"{opts.flavour}; Radius - {opts.radius}; Rank C - {loraks_rank_c}; Lambda C - {loraks_lambda_c}; "
+                 f"Rank S - {loraks_rank_s}; Lambda S - {loraks_lambda_s}; "
+                 f"coil compression - {opts.coil_compression}")
     # recon sos and phase coil combination
     solver = algorithm.ACLoraks(
         k_space_input=k_space, mask_indices_input=f_indexes,

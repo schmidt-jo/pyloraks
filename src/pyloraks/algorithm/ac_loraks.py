@@ -1,5 +1,4 @@
 from .base import Base
-from . import fns_ops
 from ..utils import plotting
 import logging
 import torch
@@ -39,6 +38,9 @@ class ACLoraks(Base):
         # completely mapped into the operator matrix
         self.idxs_ac_s: torch.tensor = self._find_ac_indices(mode="s")
         self.idxs_ac_c: torch.tensor = self._find_ac_indices(mode="c")
+        log_module.info(f"neighborhood/concat channel-time sizes: "
+                        f"S - {self.dim_t_ch * self.dim_nb * 2} ... rank S - {self.rank_s}; "
+                        f"C - {self.dim_t_ch * self.dim_nb} ... rank C - {self.rank_c}")
 
     def _find_ac_indices(self, mode: str = "s"):
         # we can use the sampling mask, rebuild it in 2d, sampling pattern equal per coil but different per echo
@@ -142,6 +144,10 @@ class ACLoraks(Base):
         We define the M_1 matrix from A^H A f and the loraks operator P_x(f) V V^H,
         after extracting V from ACS data and getting the P_x based on the Loraks mode used.
         """
+        # if input is zero vector -> S and C matrices will be 0 matrices. hence all multiplications will return 0
+        # can skip compute aka matrix generation
+        if torch.max(torch.abs(f)) < 1e-7:
+            return torch.zeros_like(f)
         m1_fhf = self.aha * f
         if self.lambda_c > 1e-6:
             m1_v_c = torch.flatten(
@@ -183,7 +189,7 @@ class ACLoraks(Base):
     def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros((1, 1)), v_c: torch.tensor = torch.zeros((1, 1))):
         n2b = torch.linalg.norm(b)
 
-        x = torch.rand_like(b)
+        x = torch.zeros_like(b)
         p = 1
         xmin = x
         iimin = 0
@@ -211,7 +217,7 @@ class ACLoraks(Base):
             else:
                 beta = rho / rho1
                 p = z + beta * p
-            q = self._get_m_1_diag_vector(f=x, v_s=v_s, v_c=v_c)
+            q = self._get_m_1_diag_vector(f=p, v_s=v_s, v_c=v_c)
             pq = torch.sum(p.conj() * q)
             alpha = rho / pq
 
@@ -227,7 +233,7 @@ class ACLoraks(Base):
                 normr_act = torch.linalg.norm(r)
                 res_vec[ii] = normr_act
                 log_module.info(f"reached convergence at step {ii + 1}")
-                break
+                # break
 
             if normr_act < normrmin:
                 normrmin = normr_act
