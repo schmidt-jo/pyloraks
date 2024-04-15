@@ -4,11 +4,21 @@ Huang F, Vijayakumar S, Li Y, Hertel S, Duensing GR.
 A software channel compression technique for faster reconstruction with many channels.
 Magn Reson Imaging 2008; 26: 133–141
 
-To do PCA based channel compression for faster computation of LORAKS
+and gcc -> idea that coil sensitivities are varying dependent on spatial position, but are assumed to be unknown.
+We benefit here from using a coil compression in each slice.
+
+Tao Zhang, John M. Pauly, Shreyas S. Vasanawala, and Michael Lustig
+Coil  Compression for Accelerated Imaging with Cartesian Sampling
+Magn Reson Med. 2013 69
+
+We do not need to compute inverse fourier transform along slice dimension as we have a slice wise acquisition.
+Do PCA based channel compression for faster computation of LORAKS
 """
 
 import torch
 import logging
+import tqdm
+import plotly.graph_objects as go
 
 log_module = logging.getLogger(__name__)
 
@@ -31,51 +41,62 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
                f"No compression done.")
         log_module.info(msg)
         return input_k_space
+    # slice wise processing
     log_module.info(f"extract ac region from sampling mask")
-    # find ac data - this is implemented for the commonly used (in jstmc) sampling scheme of acquiring middle pe lines
-    # use 0th echo, ac should be equal for all slices, all channels and all echoes
-    # start search in middle of pe dim
-    mid_read, mid_pe, _, _, _ = (torch.tensor(sampling_pattern.shape) / 2).to(torch.int)
-    lower_edge = mid_pe
-    upper_edge = mid_pe
+    # find ac data - we look for fully contained neighborhoods starting from middle position of the sampling mask
+    nx, ny = sampling_pattern.shape[:2]
+    mid_read = int(nx / 2)
+    mid_pe = int(ny / 2)
     # make sure sampling pattern is bool
     sampling_pattern = sampling_pattern.to(torch.bool)
-    for idx_pe in torch.arange(1, mid_pe):
-        # looking for sampled line (actually just looking for the read middle point)
-        # if previous line was also sampled were still in a fully sampled region
-        # assuming AC region same for all echoes
-        next_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe, 0, 0, 0]
-        next_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe, 0, 0, 0]
-        prev_up_line_sampled = sampling_pattern[mid_read, mid_pe + idx_pe - 1, 0, 0, 0]
-        prev_low_line_sampled = sampling_pattern[mid_read, mid_pe - idx_pe + 1, 0, 0, 0]
-        if next_up_line_sampled and prev_up_line_sampled:
-            upper_edge = mid_pe + idx_pe
-        if next_low_line_sampled and prev_low_line_sampled:
-            lower_edge = mid_pe - idx_pe
-        if not next_up_line_sampled or not next_low_line_sampled:
-            # get out if we hit first unsampled line
-            break
+    # move from middle out
+    l = mid_read
+    r = mid_read
+    b = mid_pe
+    t = mid_pe
+    for idx_pos in torch.arange(1, max(mid_read, mid_pe)):
+        if mid_read - idx_pos > 0:
+            if sampling_pattern[mid_read - idx_pos, mid_pe, 0, 0, 0]:
+                l -= 1
+            if sampling_pattern[mid_read + idx_pos, mid_pe, 0, 0, 0]:
+                r += 1
+        if mid_pe - idx_pos > 0:
+            if sampling_pattern[mid_read, mid_pe - idx_pos, 0, 0, 0]:
+                b -= 1
+            if sampling_pattern[mid_read, mid_pe + idx_pos, 0, 0, 0]:
+                t += 1
     # extract ac region
     ac_mask = torch.zeros_like(sampling_pattern[:, :, 0, 0, 0])
-    ac_mask[:, lower_edge:upper_edge] = True
-    # if opts.visualize and opts.debug:
-    #     plotting.plot_img(ac_mask.to(torch.int), out_path=fig_path, name="cc_ac_region")
-    log_module.info(f"start pca -> building compression matrix from calibration data")
+    ac_mask[l:r, b:t] = True
     # set input data
-    pca_data = input_k_space[ac_mask]
-    # set channel dimension first and rearrange rest
-    pca_data = torch.moveaxis(pca_data, -2, 0)
-    pca_data = torch.reshape(pca_data, (num_in_ch, -1))
-    # substract mean from each channel vector
-    pca_data = pca_data - torch.mean(pca_data, dim=1, keepdim=True)
-    # calculate covariance matrix
-    cov = torch.cov(pca_data)
-    cov_eig_val, cov_eig_vec = torch.linalg.eig(cov)
-    # get coil compression matrix
-    a_l_matrix = cov_eig_vec[:num_compressed_channels]
-    log_module.info(f"compressing data channels from {num_in_ch} to {num_compressed_channels}")
-    # compress data -> coil dimension over a_l
-    compressed_data = torch.einsum("iklmn, om -> iklon", input_k_space, a_l_matrix)
+    ac_data = input_k_space[ac_mask]
+    # allocate output_data
+    compressed_data = torch.zeros(
+        (*input_k_space.shape[:-2], num_compressed_channels, input_k_space.shape[-1]),
+        dtype=input_k_space.dtype
+    )
+    log_module.info(f"start pca -> building compression matrix from calibration data")
+    for idx_slice in tqdm.trange(input_k_space.shape[2]):
+        # if opts.visualize and opts.debug:
+        #     plotting.plot_img(ac_mask.to(torch.int), out_path=fig_path, name="cc_ac_region")
+        sli_data = ac_data[:, idx_slice]
+        # set channel dimension first and rearrange rest
+        sli_data = torch.moveaxis(sli_data, -2, 0)
+        sli_data = torch.reshape(sli_data, (num_in_ch, -1))
+        # substract mean from each channel vector
+        sli_data = sli_data - torch.mean(sli_data, dim=1, keepdim=True)
+        # calculate covariance matrix
+        cov = torch.cov(sli_data)
+        cov_eig_val, cov_eig_vec = torch.linalg.eig(cov)
+        # get coil compression matrix
+        a_l_matrix = cov_eig_vec[:num_compressed_channels]
+        log_module.debug(f"compressing data channels from {num_in_ch} to {num_compressed_channels}")
+        # compress data -> coil dimension over a_l
+        compressed_data[:, :, idx_slice] = torch.einsum(
+            "ikmn, om -> ikon",
+            input_k_space[:, :, idx_slice],
+            a_l_matrix
+        )
     # if opts.visualize and opts.debug:
     #     sli, ch, t = (torch.tensor([*compressed_data.shape[2:]]) / 2).to(torch.int)
     #     plot_k = compressed_data[:, :, sli, ch, 0]
