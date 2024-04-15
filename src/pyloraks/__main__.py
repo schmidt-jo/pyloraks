@@ -297,16 +297,16 @@ def optimize_loraks_params():
     k_space, f_indexes, _ = setup_data(opts=opts)
 
     # get loraks params from wandb
-    loraks_radius = wandb.config["radius"]
-    loraks_rank_c = wandb.config["rank_c"]
-    loraks_lambda_c = wandb.config["lambda_c"]
-    loraks_rank_s = wandb.config["rank_s"]
-    loraks_lambda_s = wandb.config["lambda_s"]
-    # loraks_radius = 3
-    # loraks_rank_c = 100
-    # loraks_lambda_c = 0.2
-    # loraks_rank_s = 200
-    # loraks_lambda_s = 0.2
+    # loraks_radius = wandb.config["radius"]
+    # loraks_rank_c = wandb.config["rank_c"]
+    # loraks_lambda_c = wandb.config["lambda_c"]
+    # loraks_rank_s = wandb.config["rank_s"]
+    # loraks_lambda_s = wandb.config["lambda_s"]
+    loraks_radius = 3
+    loraks_rank_c = 100
+    loraks_lambda_c = 0.2
+    loraks_rank_s = 200
+    loraks_lambda_s = 0.2
     logging.info(f"___ Loraks Reconstruction ___")
     logging.info(f"{opts.flavour}; Radius - {opts.radius}; Rank C - {loraks_rank_c}; Lambda C - {loraks_lambda_c}; "
                  f"Rank S - {loraks_rank_s}; Lambda S - {loraks_lambda_s}; "
@@ -317,6 +317,7 @@ def optimize_loraks_params():
         radius=loraks_radius, rank_c=loraks_rank_c, lambda_c=loraks_lambda_c,
         rank_s=loraks_rank_s, lambda_s=loraks_lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
+        channel_batch_size=opts.batch_size,
         fft_algorithm=False, device=device, fig_path=fig_path, visualize=opts.visualize
     )
     solver.reconstruct()

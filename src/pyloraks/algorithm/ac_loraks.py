@@ -13,8 +13,8 @@ class ACLoraks(Base):
     def __init__(
             self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
             max_num_iter: int, conv_tol: float,
-            radius: int, rank_c: int = 150, lambda_c: float = 0.0, rank_s: int = 250, lambda_s: float = 0.0,
-            fft_algorithm: bool = False,
+            radius: int = 3, rank_c: int = 150, lambda_c: float = 0.0, rank_s: int = 250, lambda_s: float = 0.0,
+            fft_algorithm: bool = False, channel_batch_size: int = 4,
             device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.debug(f"Setup Base class")
         # initialize base constants
@@ -23,12 +23,13 @@ class ACLoraks(Base):
             radius=radius, rank_c=rank_c, lambda_c=lambda_c,
             rank_s=rank_s, lambda_s=lambda_s,
             max_num_iter=max_num_iter, conv_tol=conv_tol,
+            channel_batch_size=channel_batch_size,
             device=device, fig_path=fig_path, visualize=visualize
         )
         log_module.debug(f"Setup AC LORAKS specifics")
         self.fft_algorithm: bool = fft_algorithm
-        # compute aha - stretch along channels
-        fhf = self.fhf[:, None, :].expand((-1, self.dim_channels, -1))
+        # compute aha - stretch along batched channels dim
+        fhf = self.fhf[:, None, :].expand((-1, self.ch_batch_size, -1))
         self.aha = torch.flatten(
             fhf + self.lambda_c * self.p_star_p_c[:, None, None] + self.lambda_s * self.p_star_p_s[:, None, None]
         ).to(self.device)
@@ -84,13 +85,16 @@ class ACLoraks(Base):
         # return the found indices
         return idxs_ac
 
-    def get_acs_v(self, idx_slice: int, mode: str):
+    def get_acs_v(self, idx_batch: int, idx_slice: int, mode: str):
         """
                 Compute the V matrix for solving the AC LORAKS formulation from autocalibration data.
                 We need to find the ACS data first and then evaluate the nullspace subspace.
                 """
         # we use data from current slice
-        k_space_slice = torch.reshape(self.fhd[idx_slice], (self.dim_s, self.dim_t_ch))
+        k_space_slice = torch.reshape(
+            self.fhd[idx_slice, :, self.ch_batch_idxs[idx_batch], :],
+            (self.dim_s, self.dim_t_ch)
+        )
         if mode in ["c", "C"]:
             # want submatrix of respecitve loraks matrix with fully populated rows
             # build X matrix from k-space current slice
@@ -132,7 +136,7 @@ class ACLoraks(Base):
             log_module.error(err)
             raise ValueError(err)
 
-        if idx_slice == 0 and self.visualize:
+        if idx_slice == 0 and idx_batch ==0 and self.visualize:
             plotting.plot_slice(v_sub, name=f"v_sub_{mode}", outpath=self.fig_path)
 
         return v_sub
@@ -208,7 +212,7 @@ class ACLoraks(Base):
 
         rho = 1
 
-        for ii in tqdm.trange(self.max_num_iter):
+        for ii in tqdm.trange(self.max_num_iter, desc="cgd iterations"):
             z = r
             rho1 = rho
             rho = torch.abs(torch.sum(r.conj() * r))
@@ -233,7 +237,7 @@ class ACLoraks(Base):
                 normr_act = torch.linalg.norm(r)
                 res_vec[ii] = normr_act
                 log_module.info(f"reached convergence at step {ii + 1}")
-                # break
+                break
 
             if normr_act < normrmin:
                 normrmin = normr_act
@@ -253,30 +257,33 @@ class ACLoraks(Base):
         # low rank constraints of the LORAKS matrices
         for idx_slice in range(self.dim_slice):
             log_module.info(f"Reconstruction::Processing::Slice {1 + idx_slice} / {self.dim_slice}")
-            log_module.debug("estimate nullspace - C")
-            if self.lambda_c > 1e-6:
-                v_sub_c = self.get_acs_v(idx_slice=idx_slice, mode="c")
-            else:
-                v_sub_c = torch.zeros((1, 1))
-            if self.lambda_s > 1e-6:
-                v_sub_s = self.get_acs_v(idx_slice=idx_slice, mode="s")
-            else:
-                v_sub_s = torch.zeros((1, 1))
+            for idx_batch in range(self.ch_batch_size):
+                log_module.info(f"Slice::Processing::Batch {1 + idx_batch} / {self.ch_batch_size}")
+                log_module.debug("estimate nullspace - C")
+                if self.lambda_c > 1e-6:
+                    v_sub_c = self.get_acs_v(idx_batch=idx_batch, idx_slice=idx_slice, mode="c")
+                else:
+                    v_sub_c = torch.zeros((1, 1))
+                if self.lambda_s > 1e-6:
+                    v_sub_s = self.get_acs_v(idx_batch=idx_batch, idx_slice=idx_slice, mode="s")
+                else:
+                    v_sub_s = torch.zeros((1, 1))
 
-            vvs = torch.matmul(v_sub_s, v_sub_s.conj().T)
-            vvc = torch.matmul(v_sub_c, v_sub_c.conj().T)
+                vvs = torch.matmul(v_sub_s, v_sub_s.conj().T)
+                vvc = torch.matmul(v_sub_c, v_sub_c.conj().T)
 
-            log_module.debug("start pcg solve")
+                log_module.debug("start pcg solve")
 
-            in_fhd = torch.flatten(self.fhd[idx_slice]).to(self.device)
+                # dim fhd [z, xy, ch, t]
+                in_fhd = torch.flatten(self.fhd[idx_slice, :, self.ch_batch_idxs[idx_batch], :]).to(self.device)
 
-            f_slice, residual_abs_sum, stats = self._cgd(b=in_fhd, v_s=vvs, v_c=vvc)
-            self.k_iter_current[idx_slice] = torch.reshape(
-                f_slice,
-                (-1, self.dim_channels, self.dim_echoes)
-            )
-            self.iter_residuals[idx_slice, :len(residual_abs_sum)] = residual_abs_sum.clone().cpu()
-            self.stats = stats
+                f_slice, residual_abs_sum, stats = self._cgd(b=in_fhd, v_s=vvs, v_c=vvc)
+                self.k_iter_current[idx_slice, :, self.ch_batch_idxs[idx_batch], :] = torch.reshape(
+                    f_slice,
+                    (-1, self.ch_batch_size, self.dim_echoes)
+                ).cpu()
+                self.iter_residuals[idx_slice, :len(residual_abs_sum)] = residual_abs_sum.clone().cpu()
+                self.stats = stats
             # ToDo implement different algorithmic choices here:
             #  multiplicative Majorize-Minimize Approach - FFT version, start with fft
 

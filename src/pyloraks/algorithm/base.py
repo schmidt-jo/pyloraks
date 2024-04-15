@@ -17,6 +17,7 @@ class Base:
     def __init__(self, k_space_input: torch.tensor, mask_indices_input: torch.tensor,
                  radius: int, max_num_iter: int, conv_tol: float,
                  rank_s: int = 250, rank_c: int = 150, lambda_c: float = 0.0, lambda_s: float = 0.0,
+                 channel_batch_size: int = 4,
                  device: torch.device = torch.device("cpu"), fig_path: plib.Path = None, visualize: bool = True):
         log_module.info(f"config loraks flavor")
         # config
@@ -31,8 +32,13 @@ class Base:
         self.dim_read, self.dim_phase, self.dim_slice, self.dim_channels, self.dim_echoes = k_space_input.shape
         # combined xy dim
         self.dim_s = self.dim_read * self.dim_phase
-        # combined ch - t dim
-        self.dim_t_ch = self.dim_echoes * self.dim_channels
+        # batch channel dimension
+        self.ch_batch_size = channel_batch_size
+        # channel batch idxs
+        self.ch_batch_idxs = torch.split(torch.randperm(self.dim_channels), self.ch_batch_size)
+
+        # combined b-ch - t dim
+        self.dim_t_ch = self.dim_echoes * self.ch_batch_size
         # loraks params
         self.radius: int = radius
         self.rank_s: int = rank_s

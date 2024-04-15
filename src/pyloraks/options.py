@@ -18,7 +18,7 @@ class Config(sp.Serializable):
         help=f"(Optional) Specify output path. If left blank, input path is used."
     )
     input_k: str = sp.field(
-        alias="-im", default="./pyloraks/example_data/fs_k.pt",
+        alias="-ik", default="./pyloraks/example_data/fs_k.pt",
         help=f"Specify input k-space data path. If no sampling mask is provided unsampled data needs to be 0 padded. "
              f"Takes .nii (.gz), .npy and .pt files. The latter two can be complex data."
     )
@@ -78,7 +78,6 @@ class Config(sp.Serializable):
         help=f"regularization parameter for Loraks S matrix "
              f"rank minimization. Set 0.0 to disable S regularization."
     )
-
     # lambda_data: float = sp.field(alias="-dl", default=0.5)
     conv_tol: float = sp.field(alias="-ct", default=1e-3)
     max_num_iter: int = sp.field(alias="-mni", default=10)
