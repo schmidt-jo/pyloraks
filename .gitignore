@@ -36,3 +36,4 @@ var/
 /wandb/
 /wandb_config/
 /src/dev/
+/src/wandb/
