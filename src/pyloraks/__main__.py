@@ -127,7 +127,8 @@ def setup_data(opts: options.Config):
         k_space = utils.compress_channels(
             input_k_space=k_space,
             sampling_pattern=sampling_pattern,
-            num_compressed_channels=opts.coil_compression
+            num_compressed_channels=opts.coil_compression,
+            use_ac_data=True, use_gcc_along_read=False
         )
     read, phase, sli, ch, t = k_space.shape
     # flatten xy dims
@@ -187,7 +188,8 @@ def main(opts: options.Config):
         rank_c=opts.rank_c, lambda_c=opts.lambda_c,
         rank_s=opts.rank_s, lambda_s=opts.lambda_s,
         max_num_iter=opts.max_num_iter, conv_tol=opts.conv_tol,
-        fft_algorithm=False, device=device, fig_path=fig_path
+        fft_algorithm=False, device=device, fig_path=fig_path,
+        channel_batch_size=opts.batch_size
     )
     solver.reconstruct()
 

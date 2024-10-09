@@ -4,6 +4,7 @@ import logging
 import torch
 import tqdm
 import pathlib as plib
+import collections
 
 log_module = logging.getLogger(__name__)
 
@@ -190,7 +191,10 @@ class ACLoraks(Base):
         """
         pass
 
-    def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros((1, 1)), v_c: torch.tensor = torch.zeros((1, 1))):
+    def _cgd(self, b: torch.tensor, v_s: torch.tensor = torch.zeros((1, 1)), v_c: torch.tensor = torch.zeros((1, 1)),
+             iter_bar: tqdm.tqdm = None):
+        iter_dict = collections.OrderedDict([("iter", "_".rjust(self.max_num_iter, "_"))])
+        iter_bar.set_postfix(ordered_dict=iter_dict)
         n2b = torch.linalg.norm(b)
 
         x = torch.zeros_like(b)
@@ -212,7 +216,7 @@ class ACLoraks(Base):
 
         rho = 1
 
-        for ii in tqdm.trange(self.max_num_iter, desc="cgd iterations"):
+        for ii in range(self.max_num_iter):
             z = r
             rho1 = rho
             rho = torch.abs(torch.sum(r.conj() * r))
@@ -244,7 +248,8 @@ class ACLoraks(Base):
                 xmin = x
                 iimin = ii
                 log_module.debug(f"min residual {normrmin:.2f}, at {iimin + 1}")
-
+            iter_dict["iter"] = f"{iter_dict['iter'][1:]}I"
+            iter_bar.set_postfix(iter_dict)
         return xmin, res_vec, {"norm_res_min": normrmin, "iteration": iimin}
 
     def _recon(self):
@@ -257,8 +262,8 @@ class ACLoraks(Base):
         # low rank constraints of the LORAKS matrices
         for idx_slice in range(self.dim_slice):
             log_module.info(f"Reconstruction::Processing::Slice {1 + idx_slice} / {self.dim_slice}")
-            for idx_batch in range(self.ch_batch_size):
-                log_module.info(f"Slice::Processing::Batch {1 + idx_batch} / {self.ch_batch_size}")
+            iter_bar = tqdm.trange(self.num_batches, desc="Slice::Processing::Batch")
+            for idx_batch in iter_bar:
                 log_module.debug("estimate nullspace - C")
                 if self.lambda_c > 1e-6:
                     v_sub_c = self.get_acs_v(idx_batch=idx_batch, idx_slice=idx_slice, mode="c")
@@ -277,7 +282,7 @@ class ACLoraks(Base):
                 # dim fhd [z, xy, ch, t]
                 in_fhd = torch.flatten(self.fhd[idx_slice, :, self.ch_batch_idxs[idx_batch], :]).to(self.device)
 
-                f_slice, residual_abs_sum, stats = self._cgd(b=in_fhd, v_s=vvs, v_c=vvc)
+                f_slice, residual_abs_sum, stats = self._cgd(b=in_fhd, v_s=vvs, v_c=vvc, iter_bar=iter_bar)
                 self.k_iter_current[idx_slice, :, self.ch_batch_idxs[idx_batch], :] = torch.reshape(
                     f_slice,
                     (-1, self.ch_batch_size, self.dim_echoes)

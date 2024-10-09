@@ -36,7 +36,7 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
         sampling_pattern = torch.unsqueeze(sampling_pattern, 2)
     nx, ny, nz, nch, nt = input_k_space.shape
     # check if we are actually provided fewer channels
-    if nch < num_compressed_channels:
+    if nch <= num_compressed_channels:
         msg = (f"input data has fewer channels ({nch}) than set for compression ({num_compressed_channels})! "
                f"No compression done.")
         log_module.info(msg)
@@ -171,7 +171,7 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
                 # # get coil compression matrix
                 # a_l_matrix = cov_eig_vec[:num_compressed_channels]
                 u_x_0, _, _ = torch.linalg.svd(gcc_data, full_matrices=False)
-                a_l_matrix = u_x_0[:num_compressed_channels]
+                a_l_matrix = torch.conj(u_x_0).T[:num_compressed_channels]
 
                 # virtual coil alignment
                 if idx_read > 0:
@@ -182,11 +182,13 @@ def compress_channels(input_k_space: torch.tensor, sampling_pattern: torch.tenso
                     # define cx
                     c_x = torch.matmul(a_l_matrix, torch.conj(a_l_matrix_last).T)
                     # compute svd
-                    ux, _, vx = torch.linalg.svd(c_x, full_matrices=False)
+                    ux, _, vxh = torch.linalg.svd(c_x, full_matrices=False)
                     # calc transform
-                    p_x = torch.linalg.matmul(torch.conj(vx).T, torch.conj(ux).T)
-                    # align compression matrix
-                    a_l_matrix = torch.matmul(p_x, a_l_matrix)
+                    p_x = torch.linalg.matmul(torch.conj(vxh).T, torch.conj(ux).T)
+                else:
+                    p_x = torch.eye(num_compressed_channels, dtype=torch.complex128)
+                # align compression matrix
+                a_l_matrix = torch.matmul(p_x, a_l_matrix)
 
                 # compress data -> coil dimension over a_l
                 compressed_data[idx_read, :, idx_slice] = torch.einsum(

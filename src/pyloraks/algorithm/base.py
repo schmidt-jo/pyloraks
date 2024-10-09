@@ -33,9 +33,10 @@ class Base:
         # combined xy dim
         self.dim_s = self.dim_read * self.dim_phase
         # batch channel dimension
-        self.ch_batch_size = channel_batch_size
+        self.ch_batch_size = min(channel_batch_size, self.dim_channels)
         # channel batch idxs
         self.ch_batch_idxs = torch.split(torch.randperm(self.dim_channels), self.ch_batch_size)
+        self.num_batches = len(self.ch_batch_idxs)
 
         # combined b-ch - t dim
         self.dim_t_ch = self.dim_echoes * self.ch_batch_size
